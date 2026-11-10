@@ -1,0 +1,9 @@
+{
+  "model": "opencode/deepseek-v4.1-flash-free",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Say 'It works!' if you can bypass the limit"
+    }
+  ]
+}
