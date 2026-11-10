@@ -8,11 +8,21 @@ import { execSync } from 'child_process';
 
 console.log('\n🔍 Finding AccountManager processes...\n');
 
-const PORTS = [3200, 3201, 3202, 3203];
+// Gateway port + check only active server ports
+const GATEWAY_PORT = 3200;
+const SERVER_PORT_START = 3201;
+const SERVER_PORT_END = 3210; // Check first 10 slots only
+
 const pidsToKill = new Set();
 
+// Find processes by ports (optimized scan)
+const portsToCheck = [GATEWAY_PORT];
+for (let port = SERVER_PORT_START; port <= SERVER_PORT_END; port++) {
+  portsToCheck.push(port);
+}
+
 // Find processes by ports
-for (const port of PORTS) {
+for (const port of portsToCheck) {
   try {
     // Windows: Get PID from netstat
     const output = execSync(`netstat -ano | findstr ":${port}"`, { encoding: 'utf8' });
@@ -57,7 +67,7 @@ console.log('🔍 Verifying ports are free...\n');
 setTimeout(() => {
   let allFree = true;
   
-  for (const port of PORTS) {
+  for (const port of portsToCheck) {
     try {
       execSync(`netstat -ano | findstr ":${port}"`, { encoding: 'utf8', stdio: 'ignore' });
       console.log(`   ⚠️  Port ${port} still in use`);

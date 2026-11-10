@@ -12,9 +12,12 @@
 ## 📊 Current Setup
 
 ```
-✅ Account 1: dungbanemok@gmail.com (200 req/day)
-✅ Account 2: hieuck.dev@gmail.com (200 req/day)
+✅ Account 1: dungbanemok@gmail.com (200 req/day) - Port 3201
+✅ Account 2: hieuck.dev@gmail.com (200 req/day) - Port 3202
 📈 Total: 400 req/day
+
+🔧 Gateway: http://localhost:3200
+🎯 Port Range: 3201-3299 (supports up to 99 accounts!)
 ```
 
 ## 🚀 Quick Start
@@ -118,16 +121,19 @@ curl http://localhost:3200/v1/chat/completions \
    - `opencode.db` → Account 1
    - `db2.db` → Account 2
    - `db3.db` → Account 3
+   - ... up to `db99.db` → Account 99
 
 2. **Server per Account**: AccountManager spawn 1 OpenCode server per database
    - Server 1 → port 3201 (opencode.db)
    - Server 2 → port 3202 (db2.db)
    - Server 3 → port 3203 (db3.db)
+   - ... automatically allocates ports 3201-3299
 
 3. **Gateway Load Balancer**: AccountManager = gateway API
-   - Nhận requests trên port 3200
+   - Gateway listens on port 3200 (fixed)
    - Round-robin giữa các servers
    - Tự động skip servers đã hết quota
+   - Auto-kill và restart nếu port bị conflict
 
 ## 💡 Tips
 

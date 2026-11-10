@@ -5,9 +5,10 @@
  */
 
 import express from 'express';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import Database from 'better-sqlite3';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import os from 'os';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 
@@ -15,8 +16,9 @@ const app = express();
 app.use(express.json());
 
 const DATA_DIR = join(os.homedir(), '.local/share/opencode');
-const MANAGER_PORT = 3200;
-const SERVER_BASE_PORT = 3201;
+const GATEWAY_PORT = 3200;        // Gateway API endpoint
+const SERVER_PORT_START = 3201;   // OpenCode servers start from 3201
+const MAX_ACCOUNTS = 99;          // Support up to 99 accounts (ports 3201-3299)
 
 // Track running servers
 const servers = new Map();
@@ -25,7 +27,8 @@ const setupSessions = new Map();
 function discoverAccounts() {
   const accounts = [];
   
-  for (let i = 1; i <= 3; i++) {
+  // Scan for all database files (opencode.db, db2.db, db3.db, ... db99.db)
+  for (let i = 1; i <= MAX_ACCOUNTS; i++) {
     const dbPath = i === 1 
       ? join(DATA_DIR, 'opencode.db')
       : join(DATA_DIR, `db${i}.db`);
@@ -47,7 +50,7 @@ function discoverAccounts() {
           id: i,
           dbPath,
           email: value.metadata?.email || 'Unknown',
-          port: SERVER_BASE_PORT + i - 1,
+          port: SERVER_PORT_START + i - 1,  // 3201, 3202, 3203, ...
           quotaUsed: 0,
           quotaLimit: 200
         });
@@ -643,12 +646,34 @@ const server = app.listen(MANAGER_PORT, () => {
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Port ${MANAGER_PORT} is already in use!`);
-    console.error(`\n💡 Solutions:`);
-    console.error(`   1. Kill existing process: node scripts/kill-gateway.mjs`);
-    console.error(`   2. Wait 30 seconds for TIME_WAIT to clear`);
-    console.error(`   3. Change MANAGER_PORT in src/AccountManager.mjs\n`);
-    process.exit(1);
+    console.error(`\n⚠️  Port ${GATEWAY_PORT} is already in use!`);
+    console.error(`\n🔍 Checking if it's our old process...\n`);
+    
+    // Try to kill our own process
+    try {
+      execSync(`node scripts/kill-gateway.mjs`, { 
+        cwd: join(dirname(fileURLToPath(import.meta.url)), '..'),
+        stdio: 'inherit' 
+      });
+      
+      console.log('\n✅ Killed old process. Restarting in 3 seconds...\n');
+      
+      setTimeout(() => {
+        // Restart ourselves
+        const child = spawn(process.argv[0], process.argv.slice(1), {
+          detached: true,
+          stdio: 'inherit'
+        });
+        child.unref();
+        process.exit(0);
+      }, 3000);
+      
+    } catch (killErr) {
+      console.error(`\n❌ Failed to auto-recover. Please run manually:`);
+      console.error(`   node scripts/kill-gateway.mjs`);
+      console.error(`   node src/AccountManager.mjs\n`);
+      process.exit(1);
+    }
   } else {
     console.error('\n❌ Server error:', err.message);
     process.exit(1);
