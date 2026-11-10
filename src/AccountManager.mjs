@@ -619,7 +619,7 @@ console.log(`
 Starting...
 `);
 
-const server = app.listen(MANAGER_PORT, () => {
+const server = app.listen(GATEWAY_PORT, () => {
   const accounts = discoverAccounts();
   
   // Auto-start servers for existing accounts
@@ -632,13 +632,13 @@ const server = app.listen(MANAGER_PORT, () => {
 ║                                                            ║
 ║  ✅ Account Manager Ready!                                ║
 ║                                                            ║
-║  🎛️  Web UI: http://localhost:${MANAGER_PORT}/                         ║
-║  📡 Gateway API: http://localhost:${MANAGER_PORT}/v1                   ║
+║  🎛️  Web UI: http://localhost:${GATEWAY_PORT}/                         ║
+║  📡 Gateway API: http://localhost:${GATEWAY_PORT}/v1                   ║
 ║                                                            ║
 ║  📊 Current Accounts: ${accounts.length}/3                             ║
 ║  📈 Total Capacity: ${accounts.length * 200} req/day                       ║
 ║                                                            ║
-║  💡 Open http://localhost:${MANAGER_PORT} to add accounts!           ║
+║  💡 Open http://localhost:${GATEWAY_PORT} to add accounts!           ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);
@@ -647,6 +647,18 @@ const server = app.listen(MANAGER_PORT, () => {
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n⚠️  Port ${GATEWAY_PORT} is already in use!`);
+    
+    // Check if retry is allowed (prevent infinite loop)
+    const retryCount = parseInt(process.env.GATEWAY_RETRY || '0');
+    if (retryCount >= 2) {
+      console.error(`\n❌ Failed to start after ${retryCount} retries.`);
+      console.error(`\n💡 Manual recovery required:`);
+      console.error(`   1. Wait 30 seconds for port to clear`);
+      console.error(`   2. Run: node scripts/kill-gateway.mjs`);
+      console.error(`   3. Run: node src/AccountManager.mjs\n`);
+      process.exit(1);
+    }
+    
     console.error(`\n🔍 Checking if it's our old process...\n`);
     
     // Try to kill our own process
@@ -656,17 +668,22 @@ server.on('error', (err) => {
         stdio: 'inherit' 
       });
       
-      console.log('\n✅ Killed old process. Restarting in 3 seconds...\n');
+      console.log(`\n✅ Killed old process. Restarting in 5 seconds...\n`);
       
       setTimeout(() => {
-        // Restart ourselves
+        // Restart with retry counter
         const child = spawn(process.argv[0], process.argv.slice(1), {
-          detached: true,
-          stdio: 'inherit'
+          detached: false,
+          stdio: 'inherit',
+          env: { ...process.env, GATEWAY_RETRY: String(retryCount + 1) }
         });
-        child.unref();
-        process.exit(0);
-      }, 3000);
+        
+        // Wait for child to finish
+        child.on('exit', (code) => {
+          process.exit(code || 0);
+        });
+        
+      }, 5000);
       
     } catch (killErr) {
       console.error(`\n❌ Failed to auto-recover. Please run manually:`);
