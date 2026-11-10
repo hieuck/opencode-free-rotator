@@ -31,18 +31,19 @@ async function runOpenCodeAuth() {
     console.log('   (Browser will open automatically by OpenCode)');
     console.log();
     
-    // Build PowerShell command with environment variable
-    const psCommand = SLOT > 1
-      ? `$env:OPENCODE_DB="${DB_PATH}"; opencode auth login opencode`
-      : 'opencode auth login opencode';
+    // Set environment variable for child process
+    const env = { ...process.env };
+    if (SLOT > 1) {
+      env.OPENCODE_DB = DB_PATH;
+      console.log(`🔧 Using database: ${DB_PATH}`);
+      console.log();
+    }
     
-    // Spawn with full TTY so OpenCode can interact
-    const proc = spawn('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      psCommand
-    ], {
-      stdio: 'inherit'  // Full terminal passthrough
+    // Spawn opencode directly with environment
+    const proc = spawn('opencode.cmd', ['auth', 'login', 'opencode'], {
+      env,
+      stdio: 'inherit',
+      shell: true
     });
     
     proc.on('close', (code) => {
