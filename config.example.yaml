@@ -1,0 +1,62 @@
+# OpenCode Free Rotator - Configuration Example
+#
+# Before running:
+# 1. Create 3+ OpenCode free accounts (separate emails)
+# 2. For each account, start OpenCode with separate DB:
+#    OPENCODE_DB=~/.local/share/opencode/db1.db opencode server --port 3001
+# 3. Run /connect in each instance to authenticate
+# 4. Verify tokens are saved in each SQLite database
+# 5. Stop manual instances, then use this config to manage them
+
+instances:
+  # Instance 1 - First free account
+  - name: "OpenCode Free 1"
+    email: "your-email-1@example.com"  # TODO: Replace with real email
+    port: 3001
+    db: "~/.local/share/opencode/db1.db"
+    quotaPerDay: 200
+    enabled: true
+    
+  # Instance 2 - Second free account  
+  - name: "OpenCode Free 2"
+    email: "your-email-2@example.com"  # TODO: Replace with real email
+    port: 3002
+    db: "~/.local/share/opencode/db2.db"
+    quotaPerDay: 200
+    enabled: true
+    
+  # Instance 3 - Third free account
+  - name: "OpenCode Free 3"
+    email: "your-email-3@example.com"  # TODO: Replace with real email
+    port: 3003
+    db: "~/.local/share/opencode/db3.db"
+    quotaPerDay: 200
+    enabled: true
+
+# Gateway settings
+gateway:
+  # Gateway listen port
+  port: 20130
+  host: "127.0.0.1"
+  
+  # Daily quota reset time (UTC hour, 0-23)
+  # 0 = midnight UTC
+  quotaResetHour: 0
+  
+  # Instance selection strategy:
+  # - "lowest-usage": Select instance with least requests today (recommended)
+  # - "round-robin": Simple rotation through available instances
+  selectionStrategy: "lowest-usage"
+  
+  # Retry with next instance if one fails
+  retryOnFailure: true
+  maxRetries: 3
+  
+  # Timeout for forwarded requests (milliseconds)
+  requestTimeout: 60000
+
+# Logging
+logging:
+  level: "info"  # debug, info, warn, error
+  logFile: "gateway.log"
+  logRequests: true  # Log each forwarded request

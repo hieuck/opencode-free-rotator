@@ -1,0 +1,33 @@
+instances:
+  - name: "OpenCode Free 1"
+    email: "account1@example.com"
+    port: 3001
+    db: "~/.local/share/opencode/db1.db"
+    quotaPerDay: 200
+    enabled: true
+    
+  - name: "OpenCode Free 2"
+    email: "account2@example.com"
+    port: 3002
+    db: "~/.local/share/opencode/db2.db"
+    quotaPerDay: 200
+    enabled: true
+    
+  - name: "OpenCode Free 3"
+    email: "account3@example.com"
+    port: 3003
+    db: "~/.local/share/opencode/db3.db"
+    quotaPerDay: 200
+    enabled: true
+
+gateway:
+  port: 20130
+  host: "127.0.0.1"
+  quotaResetHour: 0  # UTC midnight
+  
+  # Selection strategy: "round-robin" or "lowest-usage"
+  selectionStrategy: "lowest-usage"
+  
+  # Retry with next instance on failure
+  retryOnFailure: true
+  maxRetries: 3
