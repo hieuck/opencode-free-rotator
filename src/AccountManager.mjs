@@ -616,7 +616,7 @@ console.log(`
 Starting...
 `);
 
-app.listen(MANAGER_PORT, () => {
+const server = app.listen(MANAGER_PORT, () => {
   const accounts = discoverAccounts();
   
   // Auto-start servers for existing accounts
@@ -639,4 +639,18 @@ app.listen(MANAGER_PORT, () => {
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${MANAGER_PORT} is already in use!`);
+    console.error(`\n💡 Solutions:`);
+    console.error(`   1. Kill existing process: node scripts/kill-gateway.mjs`);
+    console.error(`   2. Wait 30 seconds for TIME_WAIT to clear`);
+    console.error(`   3. Change MANAGER_PORT in src/AccountManager.mjs\n`);
+    process.exit(1);
+  } else {
+    console.error('\n❌ Server error:', err.message);
+    process.exit(1);
+  }
 });

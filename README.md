@@ -1,376 +1,203 @@
-# OpenCode Free Rotator
+# OpenCode Free Account Rotator
 
-💡 **Bypass OpenCode free tier 200 req/day limit with automatic account rotation**
-
-## 🎉 **NEW: Working Gateway Solution!**
-
-**Status:** ✅ **PROVEN WORKING** - Automatic rotation implemented and tested
-
-### ⚡ Quick Start (2 Minutes)
-
-```bash
-# 1. Authenticate accounts
-opencode  # Account 1
-OPENCODE_DB=~/.local/share/opencode/db2.db opencode  # Account 2
-OPENCODE_DB=~/.local/share/opencode/db3.db opencode  # Account 3
-
-# 2. Start gateway
-./quick-start.sh    # Linux/Mac
-quick-start.bat     # Windows
-
-# 3. Use it!
-curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}]}'
-```
-
-**Result:** 600+ requests/day with automatic rotation! 🚀
-
-👉 **See [README-GATEWAY.md](README-GATEWAY.md) for complete guide** 👈
-
----
-
-## 📊 Three Solutions - Pick What Fits
-
-| Solution | Setup | Daily Quota | Use Case | SDK Compatible |
-|----------|-------|-------------|----------|----------------|
-| **[Gateway](README-GATEWAY.md)** ⭐ | 2 min | 600+ | Best of both | ✅ Yes |
-| **[Alias](README-PERSONAL-USE.md)** | 5 min | 600+ | CLI only | ❌ No |
-| **[Research](INVESTIGATION_REPORT.md)** | 8-16h | 600+ | Learning | ✅ Yes |
-
-**Recommended:** Gateway solution (2 min setup, OpenAI SDK compatible)
-
-```
-Gateway → OpenCode Instance 1 (200 req/day)
-       → OpenCode Instance 2 (200 req/day)
-       → OpenCode Instance 3 (200 req/day)
-       
-Total: 600 req/day with 3 accounts
-```
-
-## 🎯 Goal
-
-Scale OpenCode free tier usage by rotating multiple accounts, each with isolated OpenCode server instances.
-
-## 🚧 Implementation Status
-
-### Simple Solution (Personal Use) ✅
-- ✅ **Ready to use** - 5 minutes setup
-- ✅ Manual account switching with alias
-- ✅ Auto-rotate scripts (bash/Windows)
-- ✅ Perfect for personal machines
-
-### Complex Solution (Production API) ⚠️
-- ✅ Phase 1-5: Complete architecture & docs
-- ❌ **Blocked:** Translation layer needed (8-16h)
-- ⚠️ For production API services only
-
-## 📊 Which Solution for You?
-
-| Your Need | Recommended Solution | Setup Time | Quota |
-|-----------|---------------------|------------|-------|
-| **Personal machine** | Simple (alias/script) | 5-15 min | 600+ req/day |
-| **Learning/Research** | Both (already done) | 8h | N/A |
-| **Production API service** | Complex (needs work) | 8-16h more | 600+ req/day |
-
-👉 **Most users want:** [Simple Personal Solution](README-PERSONAL-USE.md)
-
-## ⚠️ Critical Issue
-
-**Problem:** The gateway forwards requests to `/v1/chat/completions` on local OpenCode servers, but this endpoint **does not exist locally**.
-
-**Reality Check:**
-- ✅ Local OpenCode server starts successfully
-- ✅ Exposes native API: `/api/session`, `/api/session/:id/message`
-- ❌ Does NOT expose OpenAI-compatible `/v1/chat/completions`
-- ❌ Gateway cannot forward requests (endpoint doesn't exist)
-
-**See:** [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for full technical details.
-
-## 🎯 Possible Solutions
-
-### Option A: Implement Translation Layer (Complex)
-Build an OpenAI → OpenCode API adapter:
-- Map Chat Completions to OpenCode's `/api/session` + `/api/message`
-- Handle authentication (HTTP Basic)
-- Support streaming (SSE)
-- **Effort:** 8-16 hours
-- **Status:** Not started
-
-### Option B: Use Hosted API (Recommended)
-Pool accounts hitting OpenCode's hosted API directly:
-- Extract OAuth tokens from SQLite DBs
-- Forward to `https://api.opencode.ai/v1/chat/completions`
-- Track quota per account
-- **Effort:** 4-8 hours
-- **Status:** Not started
-
-### Option C: Document as Research
-Mark as research project and document findings:
-- **Status:** ✅ Done (this README)
-
-## 🚀 Quick Start
-
-**Note:** Current implementation is non-functional due to API incompatibility. Do not attempt to deploy.
-
-```bash
-# 1. Install
-npm install
-
-# 2. Setup 3+ OpenCode free accounts
-# See docs/SETUP_GUIDE.md
-
-# 3. Configure
-cp config.example.yaml config.yaml
-# Edit with your account details
-
-# 4. Start gateway
-npm start
-```
-
-Gateway available at: `http://127.0.0.1:20130/v1/chat/completions`
-
-## 📊 How It Works
-
-**Architecture:**
-```
-Client Request
-    ↓
-┌─────────────────────────────────────┐
-│  Gateway (Port 20130)               │
-│  - Select instance with quota       │
-│  - Forward request                  │
-│  - Track usage (200 req/day)        │
-└──────────┬──────────────────────────┘
-           │ Lowest-usage selection
-     ┌─────┴──────┬──────────┐
-     ▼            ▼          ▼
-┌─────────┐  ┌─────────┐  ┌─────────┐
-│Instance │  │Instance │  │Instance │
-│   #1    │  │   #2    │  │   #3    │
-│Port 3001│  │Port 3002│  │Port 3003│
-│ 45/200  │  │  5/200  │  │195/200  │
-└─────────┘  └─────────┘  └─────────┘
-```
-
-**Each instance:**
-- Separate OpenCode server process
-- Isolated SQLite database
-- Own OAuth token (auto-refresh)
-- Independent 200 req/day quota
-
-**Gateway:**
-- OpenAI-compatible `/v1/chat/completions`
-- Automatic instance selection
-- Quota tracking and reset
-- Retry on failure
+**Bypass OpenCode 200 req/day limit** bằng cách tự động xoay giữa nhiều free accounts!
 
 ## ✨ Features
 
-- **Multi-Instance Pooling** - Run N OpenCode servers simultaneously
-- **Quota Management** - Track 200 req/day per account
-- **Smart Selection** - Lowest-usage or round-robin strategies
-- **Auto Retry** - Failover to next instance on error
-- **Daily Reset** - Automatic quota reset at midnight UTC
-- **OpenAI Compatible** - Drop-in replacement for OpenAI API
-- **Health Monitoring** - `/health` and `/status` endpoints
-- **Production Ready** - systemd, PM2, Docker support
+- ✅ **Tự động xoay** giữa nhiều free accounts (mỗi account = 200 req/day)
+- ✅ **Không cần Web UI** - chỉ thêm connection thủ công rồi để gateway tự động xoay
+- ✅ **Tương thích với Kiro/Codex** - dùng như OpenCode API bình thường
+- ✅ **Tự động tổ chức** credentials vào separate databases
 
-## 🔧 Commands
+## 📊 Current Setup
+
+```
+✅ Account 1: dungbanemok@gmail.com (200 req/day)
+✅ Account 2: hieuck.dev@gmail.com (200 req/day)
+📈 Total: 400 req/day
+```
+
+## 🚀 Quick Start
+
+### 1. Thêm Accounts (Thao tác thủ công)
+
+**Cách 1: Dùng OpenCode CLI thủ công**
+
+```powershell
+# Account 1 (opencode.db - mặc định)
+opencode
+# Gõ: /connect → Login với email 1
+
+# Account 2 (db2.db)
+$env:OPENCODE_DB="C:\Users\hieut\.local\share\opencode\db2.db"
+opencode
+# Gõ: /connect → Login với email 2 (KHÁC email 1!)
+
+# Account 3 (db3.db) - Optional
+$env:OPENCODE_DB="C:\Users\hieut\.local\share\opencode\db3.db"
+opencode
+# Gõ: /connect → Login với email 3
+```
+
+**Cách 2: Dùng helper script**
 
 ```bash
-# Start gateway (instances + HTTP server)
-npm start
-
-# Instance management
-npm run instances:start        # Start all instances
-npm run instances:stop         # Stop all instances
-npm run instances:status       # Show instance status
-npm run instances:reset-quota  # Reset daily quotas
-
-# Development
-npm test                       # Run tests (TBD)
+# Double-click add-account.bat
+# Script sẽ tự động mở PowerShell với database đúng
+# Bạn chỉ cần gõ /connect và login
 ```
 
-## 🏆 What Was Accomplished
+### 2. Tự động tổ chức credentials
 
-✅ **Complete architecture design** - Multi-instance pooling approach  
-✅ **Instance manager** - Spawn/manage multiple OpenCode servers  
-✅ **Gateway proxy** - HTTP server with routing logic  
-✅ **Quota tracking** - Per-instance usage and reset  
-✅ **Production configs** - systemd, PM2, Docker ready  
-✅ **Comprehensive docs** - 5 detailed guides  
-✅ **Code review** - DeepSeek v4.1 validation  
-❌ **Core functionality** - Blocked by API incompatibility
-
-## 📚 Documentation
-
-- [Setup Guide](docs/SETUP_GUIDE.md) - Step-by-step account setup
-- [Usage Guide](docs/USAGE_GUIDE.md) - Running in production
-- [Phase 1 Research](docs/RESEARCH.md) - OAuth token analysis
-- [Phase 2 Complete](docs/PHASE2_COMPLETE.md) - Multi-instance architecture
-
-## 🏗️ Project Structure
-
-```
-opencode-free-rotator/
-├── src/
-│   ├── InstanceManager.mjs    # Manage OpenCode instances
-│   └── Gateway.mjs             # HTTP gateway proxy
-├── scripts/
-│   ├── inspect-db.mjs          # Examine SQLite schema
-│   ├── inspect-credentials.mjs # List credentials
-│   └── analyze-opencode-cred.mjs # Parse OAuth tokens
-├── docs/
-│   ├── SETUP_GUIDE.md          # Account setup walkthrough
-│   ├── USAGE_GUIDE.md          # Production deployment
-│   ├── RESEARCH.md             # Phase 1 findings
-│   └── PHASE2_COMPLETE.md      # Architecture decisions
-├── cli.mjs                     # Instance manager CLI
-├── server.mjs                  # Gateway entry point
-├── config.yaml                 # Your config (edit this)
-└── config.example.yaml         # Config template
-```
-
-## 💡 Use Cases
-
-**Development:**
-- Local AI model access without rate limits
-- Testing and prototyping
-- Multi-account workflow automation
-
-**Production:**
-- Scale beyond 200 req/day
-- High-availability setup
-- Cost-effective AI API access
-
-## ⚙️ Configuration Example
-
-```yaml
-instances:
-  - name: "OpenCode Free 1"
-    email: "user1@example.com"
-    port: 3001
-    db: "~/.local/share/opencode/db1.db"
-    quotaPerDay: 200
-    enabled: true
-
-gateway:
-  port: 20130
-  host: "127.0.0.1"
-  selectionStrategy: "lowest-usage"  # or "round-robin"
-  retryOnFailure: true
-  maxRetries: 3
-```
-
-## 🔍 Research Summary
-
-### Why Multi-Instance?
-
-OpenCode free models are **client-locked** - they only work from within the OpenCode client, not via external API calls.
-
-**Attempted approaches:**
-1. ❌ Direct API with extracted OAuth tokens → 403 Forbidden
-2. ❌ External OAuth refresh → No public endpoint
-3. ✅ Multi-instance proxy → WORKS!
-
-### Architecture Decision
-
-**Only viable solution:** Run multiple OpenCode server instances, each with:
-- Separate database (OAuth tokens)
-- Separate port
-- Separate free account
-- OpenCode handles OAuth refresh internally
-
-Gateway simply forwards requests to instances with available quota.
-
-## 📈 Scaling
-
-**Quota calculation:**
-- 1 account = 200 req/day
-- 3 accounts = 600 req/day  (~25 req/hour)
-- 5 accounts = 1,000 req/day (~42 req/hour)
-- 10 accounts = 2,000 req/day (~83 req/hour)
-
-**Resource usage (per instance):**
-- RAM: ~200-500 MB
-- Disk: ~50 MB
-- CPU: ~1-5%
-
-**For 3 instances:**
-- Total RAM: ~1.5 GB
-- Total disk: ~150 MB
-- Ports: 3001-3003 + 20130
-
-## 🚧 Current Limitations
-
-- Free models only (beam-free, iceman-contributor-free, etc.)
-- Requires multiple email accounts
-- Windows/Linux/macOS only (where OpenCode runs)
-- Each instance = full OpenCode process (resource intensive)
-
-## 🛠️ Troubleshooting
-
-**Gateway won't start:**
 ```bash
-npm run instances:status  # Check instance health
-npm run instances:start   # Start instances manually
+node scripts/organize-credentials.mjs
 ```
 
-**All quota exhausted:**
+Script này sẽ:
+- Tìm tất cả credentials từ tất cả databases
+- Tách mỗi email vào database riêng
+- Backup databases cũ trước khi sửa
+- Report final setup
+
+### 3. Start Gateway
+
 ```bash
-npm run instances:reset-quota  # Manual reset
+node src/AccountManager.mjs
 ```
 
-**Instance not responding:**
+Gateway sẽ:
+- Tự động detect accounts từ databases
+- Spawn OpenCode server cho mỗi account
+- Expose unified API endpoint trên port 3200
+- Tự động xoay requests giữa accounts
+
+### 4. Sử dụng
+
+**Cấu hình Kiro/Codex:**
+
+```json
+{
+  "providers": [
+    {
+      "id": "opencode-rotator",
+      "baseUrl": "http://localhost:3200/v1"
+    }
+  ]
+}
+```
+
+**Hoặc test trực tiếp:**
+
 ```bash
-# Check health
-curl http://127.0.0.1:3001/health
-
-# Restart
-npm run instances:stop
-npm run instances:start
-```
-
-## 🤝 Integration
-
-**With LangChain:**
-```javascript
-const model = new ChatOpenAI({
-  modelName: "beam-free",
-  configuration: {
-    baseURL: "http://127.0.0.1:20130/v1",
-  },
-});
-```
-
-**With OpenAI SDK:**
-```javascript
-const client = new OpenAI({
-  baseURL: "http://127.0.0.1:20130/v1",
-});
-```
-
-**With curl:**
-```bash
-curl http://127.0.0.1:20130/v1/chat/completions \
+curl http://localhost:3200/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "beam-free", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{
+    "model": "claude-sonnet-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
 ```
 
-## 📄 License
+## 📁 File Structure
+
+```
+.
+├── src/
+│   └── AccountManager.mjs      # Main gateway + server spawner
+├── scripts/
+│   ├── organize-credentials.mjs  # Auto-organize mixed credentials
+│   ├── list-accounts.mjs         # List all accounts
+│   ├── check-db.mjs              # Check database contents
+│   └── check-credential.mjs      # Verify credential exists
+├── add-account.bat             # Helper script for adding accounts
+└── quick-test.mjs              # Test rotation
+```
+
+## 🔧 How It Works
+
+1. **Multiple Databases**: Mỗi account = 1 database file riêng
+   - `opencode.db` → Account 1
+   - `db2.db` → Account 2
+   - `db3.db` → Account 3
+
+2. **Server per Account**: AccountManager spawn 1 OpenCode server per database
+   - Server 1 → port 3201 (opencode.db)
+   - Server 2 → port 3202 (db2.db)
+   - Server 3 → port 3203 (db3.db)
+
+3. **Gateway Load Balancer**: AccountManager = gateway API
+   - Nhận requests trên port 3200
+   - Round-robin giữa các servers
+   - Tự động skip servers đã hết quota
+
+## 💡 Tips
+
+### Thêm Account thứ 3 (600 req/day total)
+
+```bash
+# 1. Add connection với email thứ 3
+$env:OPENCODE_DB="C:\Users\hieut\.local\share\opencode\db3.db"
+opencode
+# Gõ: /connect
+
+# 2. Organize lại
+node scripts/organize-credentials.mjs
+
+# 3. Restart gateway
+# (Kill process cũ, rồi start lại)
+node src/AccountManager.mjs
+```
+
+### Kiểm tra accounts hiện tại
+
+```bash
+node scripts/list-accounts.mjs
+```
+
+### Backup databases trước khi sửa
+
+```bash
+# organize-credentials.mjs tự động backup vào:
+C:\Users\hieut\.local\share\opencode\backup-{timestamp}/
+```
+
+## ⚠️ Lưu ý
+
+1. **Mỗi database PHẢI có email KHÁC NHAU** - cùng email = cùng quota!
+2. **Gateway phải chạy liên tục** để rotation hoạt động
+3. **Quota reset 00:00 UTC mỗi ngày** - tất cả accounts reset cùng lúc
+4. **Port conflicts**: Nếu ports 3200-3203 bị chiếm, sửa trong `AccountManager.mjs`
+
+## 📈 Monitoring
+
+Gateway log hiển thị:
+- ✅ Server ready: Khi OpenCode server spawn thành công
+- 📡 Request: Mỗi request đến và account nào xử lý
+- ⚠️ Quota exhausted: Khi account hết quota
+- ❌ All accounts exhausted: Khi tất cả accounts hết quota
+
+## 🐛 Troubleshooting
+
+**"All accounts exhausted"**
+- Tất cả accounts đã hết 200 req/day
+- Đợi đến 00:00 UTC để quota reset
+- Hoặc thêm account thứ 3
+
+**"Port already in use"**
+- Có AccountManager đang chạy rồi
+- Kill process: `taskkill /F /IM node.exe`
+- Restart lại
+
+**Server không spawn**
+- Check database có credential không: `node scripts/check-db.mjs <path>`
+- Check log trong console output
+
+## 📝 License
 
 MIT
 
 ## 🙏 Credits
 
-Built with insights from:
-- OpenCode OAuth research
-- Multi-instance pooling patterns from `cockpit-tools-gateway`
-- OpenCode CLI and API documentation
-
----
-
-**Status:** ✅ Production ready - Multi-instance pooling works!  
-**Implementation time:** ~8-11 hours (research + code)  
-**Next:** Deploy and scale with more accounts
+Built with:
+- OpenCode CLI
+- better-sqlite3
+- express
