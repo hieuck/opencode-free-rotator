@@ -1,0 +1,23 @@
+{
+  "name": "opencode-free-rotator",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode free tier account pooling to bypass 200 req/day limit",
+  "main": "src/index.mjs",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "dev": "node src/cli.mjs",
+    "start": "node src/server.mjs"
+  },
+  "keywords": [
+    "opencode",
+    "pooling",
+    "free-tier",
+    "quota-rotation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  }
+}
