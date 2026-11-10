@@ -1,530 +1,640 @@
-import fs from 'fs';
-import path from 'path';
-import yaml from 'yaml';
-import { TokenManager, TokenError, expandHome } from './TokenManager.mjs';
+#!/usr/bin/env node
+/**
+ * Automatic Account Manager
+ * User clicks "Add Account" → Terminal opens → User connects → Done!
+ */
 
-const DEFAULT_UPSTREAM = {
-  // Hosted inference base. `/models` and `/chat/completions` live under it.
-  baseUrl: 'https://opencode.ai/inference/openai/v1',
-  chatPath: '/chat/completions',
-  modelsPath: '/models',
-  // Real per-org quota (rolling / weekly / monthly buckets).
-  usageUrl: 'https://opencode.ai/zen/go/v1/usage',
-  userAgent: 'opencode/2.2.6',
-  timeoutMs: 120_000,
-};
+import express from 'express';
+import { spawn } from 'child_process';
+import Database from 'better-sqlite3';
+import { join } from 'path';
+import os from 'os';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 
-const DEFAULT_GATEWAY = {
-  port: 20130,
-  host: '127.0.0.1',
-  defaultQuotaPerDay: 200,
-  selectionStrategy: 'lowest-usage',
-  retryOnFailure: true,
-  maxRetries: 3,
-  cooldownOn429Ms: 60_000,
-  requestTimeout: 120_000,
-  quotaRefreshMs: 300_000,
-  stateFile: '.rotator-state.json',
-};
+const app = express();
+app.use(express.json());
 
-const DEFAULT_TOKENS = {
-  cacheTtlMs: 15_000,
-  refreshSkewMs: 120_000,
-  refreshTimeoutMs: 20_000,
-  clientId: 'opencode-cli',
-  writeBack: true,
-};
+const DATA_DIR = join(os.homedir(), '.local/share/opencode');
+const MANAGER_PORT = 3200;
+const SERVER_BASE_PORT = 3201;
 
-const DEFAULT_LOGGING = { level: 'info', logRequests: true };
+// Track running servers
+const servers = new Map();
+const setupSessions = new Map();
 
-const utcDay = (date = new Date()) => date.toISOString().slice(0, 10);
+function discoverAccounts() {
+  const accounts = [];
+  
+  for (let i = 1; i <= 3; i++) {
+    const dbPath = i === 1 
+      ? join(DATA_DIR, 'opencode.db')
+      : join(DATA_DIR, `db${i}.db`);
+    
+    if (!existsSync(dbPath)) continue;
+    
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      const cred = db.prepare(`
+        SELECT * FROM credential 
+        WHERE integration_id = 'opencode'
+        ORDER BY time_created DESC LIMIT 1
+      `).get();
+      db.close();
+      
+      if (cred) {
+        const value = JSON.parse(cred.value);
+        accounts.push({
+          id: i,
+          dbPath,
+          email: value.metadata?.email || 'Unknown',
+          port: SERVER_BASE_PORT + i - 1,
+          quotaUsed: 0,
+          quotaLimit: 200
+        });
+      }
+    } catch (err) {
+      // Skip
+    }
+  }
+  
+  return accounts;
+}
+
+function startOpenCodeServer(account) {
+  if (servers.has(account.id)) {
+    return servers.get(account.id);
+  }
+  
+  console.log(`\n🚀 Starting Server ${account.id} (${account.email})...`);
+  
+  const env = { ...process.env };
+  if (account.id > 1) {
+    env.OPENCODE_DB = account.dbPath;
+  }
+  
+  const args = account.id > 1
+    ? ['-NoProfile', '-Command', `$env:OPENCODE_DB="${account.dbPath}"; opencode serve --port ${account.port} --hostname 127.0.0.1`]
+    : ['-NoProfile', '-Command', `opencode serve --port ${account.port} --hostname 127.0.0.1`];
+  
+  const proc = spawn('powershell.exe', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  
+  let password = null;
+  
+  proc.stdout.on('data', (data) => {
+    const output = data.toString();
+    console.log(`   [Server ${account.id}] ${output.trim()}`);
+    const match = output.match(/server password ([^\s]+)/);
+    if (match) {
+      password = match[1];
+      account.password = password;
+      console.log(`   ✅ Server ${account.id} ready on port ${account.port}`);
+    }
+  });
+  
+  proc.stderr.on('data', (data) => {
+    console.log(`   [Server ${account.id} ERROR] ${data.toString().trim()}`);
+  });
+  
+  proc.on('close', (code) => {
+    console.log(`   ❌ Server ${account.id} stopped with code ${code}`);
+    servers.delete(account.id);
+  });
+  
+  account.process = proc;
+  account.url = `http://127.0.0.1:${account.port}`;
+  servers.set(account.id, account);
+  
+  return account;
+}
+
+// Get next account slot
+function getNextSlot() {
+  const accounts = discoverAccounts();
+  const usedIds = accounts.map(a => a.id);
+  
+  for (let i = 1; i <= 3; i++) {
+    if (!usedIds.includes(i)) {
+      return {
+        id: i,
+        dbPath: i === 1 
+          ? join(DATA_DIR, 'opencode.db')
+          : join(DATA_DIR, `db${i}.db`)
+      };
+    }
+  }
+  
+  return null;
+}
 
 /**
- * Pools OpenCode accounts that talk to the hosted API.
- *
- * Each account is a credential in an OpenCode SQLite database (or a static token
- * from config). The manager owns quota accounting, account selection and real
- * usage polling; it never spawns processes.
+ * Add Account - Opens OpenCode in new terminal
  */
-export class AccountManager {
-  constructor(configPath, options = {}) {
-    this.configPath = configPath;
-    this.config = null;
-    this.upstream = { ...DEFAULT_UPSTREAM };
-    this.tokenOptions = { ...DEFAULT_TOKENS };
-    this.accounts = new Map(); // name -> account record
-    this.roundRobinIndex = 0;
-    this.quotaTimer = null;
-    this.stateTimer = null;
-    this.stateDirty = false;
-    this.options = { logger: console, ...options };
-
-    this.loadConfig();
-    this.tokenManager = new TokenManager([], this.tokenOptions);
-    this.loadState();
+app.post('/accounts/add', (req, res) => {
+  const slot = getNextSlot();
+  
+  if (!slot) {
+    return res.status(400).json({ 
+      error: 'All 3 account slots are used' 
+    });
   }
+  
+  console.log(`\n🔐 Setting up Account ${slot.id}...`);
+  console.log(`   Database: ${slot.dbPath}`);
+  
+  // Create PowerShell script to open new terminal with OpenCode
+  const scriptPath = join(os.tmpdir(), `opencode-setup-${slot.id}.ps1`);
+  const script = slot.id === 1 
+    ? `
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  OpenCode Account ${slot.id} Setup" -ForegroundColor Green
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Database: ${slot.dbPath}" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Steps:" -ForegroundColor White
+Write-Host "1. Type: /connect" -ForegroundColor Yellow
+Write-Host "2. Login with your email" -ForegroundColor Yellow
+Write-Host "3. Close this window when done" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
 
-  loadConfig() {
-    const raw = fs.readFileSync(this.configPath, 'utf8');
-    this.config = yaml.parse(raw) || {};
+opencode
 
-    if (!this.config.gateway || typeof this.config.gateway !== 'object') {
-      throw new Error(`Config ${this.configPath} is missing a "gateway" block`);
+Write-Host ""
+Write-Host "Setup complete! Refresh the web page." -ForegroundColor Green
+Read-Host "Press Enter to close"
+`
+    : `
+$env:OPENCODE_DB = "${slot.dbPath}"
+
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  OpenCode Account ${slot.id} Setup" -ForegroundColor Green
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Database: ${slot.dbPath}" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Steps:" -ForegroundColor White
+Write-Host "1. Type: /connect" -ForegroundColor Yellow
+Write-Host "2. Login with DIFFERENT email" -ForegroundColor Yellow
+Write-Host "3. Close this window when done" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+opencode
+
+Write-Host ""
+Write-Host "Setup complete! Refresh the web page." -ForegroundColor Green
+Read-Host "Press Enter to close"
+`;
+  
+  writeFileSync(scriptPath, script, 'utf8');
+  
+  // Open new PowerShell terminal
+  spawn('powershell.exe', [
+    '-NoExit',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', scriptPath
+  ], {
+    detached: true,
+    stdio: 'ignore'
+  }).unref();
+  
+  setupSessions.set(slot.id, {
+    id: slot.id,
+    dbPath: slot.dbPath,
+    startedAt: Date.now()
+  });
+  
+  res.json({
+    message: `Setup started for Account ${slot.id}`,
+    instructions: [
+      'A new terminal window opened',
+      'Type: /connect',
+      'Login with your email',
+      'Close terminal when done',
+      'Refresh this page'
+    ],
+    slot: slot.id
+  });
+});
+
+/**
+ * Get accounts status
+ */
+app.get('/accounts', (req, res) => {
+  const accounts = discoverAccounts();
+  
+  // Start servers for new accounts
+  accounts.forEach(acc => {
+    if (!servers.has(acc.id)) {
+      startOpenCodeServer(acc);
     }
+  });
+  
+  res.json({
+    accounts: accounts.map(a => ({
+      id: a.id,
+      email: a.email,
+      port: a.port,
+      quota: `${a.quotaUsed}/${a.quotaLimit}`,
+      status: servers.has(a.id) && servers.get(a.id).password ? 'running' : 'starting'
+    })),
+    slots_used: accounts.length,
+    slots_total: 3,
+    total_capacity: accounts.length * 200,
+    can_add_more: accounts.length < 3
+  });
+});
 
-    // `instances` is the pre-hosted-pooling name; accept it so old configs still load.
-    const accountList = this.config.accounts ?? this.config.instances;
-    if (!Array.isArray(accountList)) {
-      throw new Error(`Config ${this.configPath} is missing an "accounts" list`);
-    }
-
-    this.upstream = { ...DEFAULT_UPSTREAM, ...(this.config.upstream || {}) };
-    if (this.config.gateway.upstreamPath) {
-      this.upstream.chatPath = this.config.gateway.upstreamPath;
-    }
-    this.upstream.baseUrl = String(this.upstream.baseUrl).replace(/\/+$/, '');
-
-    this.gateway = { ...DEFAULT_GATEWAY, ...this.config.gateway };
-    this.tokens = { ...DEFAULT_TOKENS, ...(this.config.tokens || {}) };
-    this.logging = { ...DEFAULT_LOGGING, ...(this.config.logging || {}) };
-    this.tokenOptions = { ...this.tokens, logger: this.options.logger };
-
-    const seen = new Set();
-    for (const entry of accountList) {
-      if (!entry || typeof entry !== 'object') {
-        throw new Error('Every entry in "accounts" must be an object');
+/**
+ * Gateway endpoint
+ */
+app.post('/v1/chat/completions', async (req, res) => {
+  const { messages, model = 'opencode/deepseek-v4.1-flash-free' } = req.body;
+  
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({
+      error: { message: 'Invalid request: messages required' }
+    });
+  }
+  
+  const accounts = discoverAccounts();
+  
+  if (accounts.length === 0) {
+    return res.status(503).json({
+      error: {
+        message: 'No accounts connected',
+        instructions: 'Go to http://localhost:3100 and add an account'
       }
-      const { name, db, token, quotaPerDay } = entry;
-      if (!name) throw new Error(`Account without a name: ${JSON.stringify(entry)}`);
-      if (seen.has(name)) throw new Error(`Duplicate account name "${name}"`);
-      seen.add(name);
-
-      if (!db && !token) {
-        throw new Error(`Account "${name}" needs either "db" (OpenCode SQLite path) or "token"`);
-      }
-      if (db && typeof db !== 'string') {
-        throw new Error(`Account "${name}" has a non-string "db"`);
-      }
-      if (quotaPerDay !== undefined && (!Number.isFinite(Number(quotaPerDay)) || Number(quotaPerDay) < 1)) {
-        throw new Error(`Account "${name}" has an invalid quotaPerDay: ${quotaPerDay}`);
-      }
-    }
-
-    const enabled = accountList.filter((entry) => entry.enabled !== false);
-    if (enabled.length === 0) {
-      throw new Error('No enabled accounts — enable at least one entry in "accounts"');
-    }
-
-    this.accounts.clear();
-    for (const entry of accountList) {
-      this.accounts.set(entry.name, this.makeAccount(entry));
-    }
-
-    this.logger.log(`✅ Loaded config with ${accountList.length} accounts (${enabled.length} enabled)`);
-    this.logger.log(`🔗 Hosted upstream: ${this.upstream.baseUrl}${this.upstream.chatPath}`);
+    });
   }
-
-  get logger() {
-    return this.options.logger;
-  }
-
-  makeAccount(entry) {
-    const enabled = entry.enabled !== false;
-    return {
-      name: entry.name,
-      config: { ...entry, db: entry.db ? expandHome(entry.db) : undefined },
-      ready: false,
-      enabled,
-      error: null,
-      auth: null,
-      stats: {
-        requestsToday: 0,
-        inFlight: 0,
-        failures: 0,
-        lastReset: new Date().toISOString(),
-        startedAt: new Date().toISOString(),
-        lastError: null,
-        lastErrorCode: null,
-        cooldownUntil: 0,
-        limited: null, // null = unknown, true/false = from real usage API or a 429
-        limitedResetsAt: null,
-        fundsExhausted: false,
-        usage: null,
-        lastQuotaAt: null,
-        lastQuotaError: null,
-        lastStatus: null,
-        lastUsedAt: null,
-      },
-    };
-  }
-
-  /** Quota for one account, in requests/day. */
-  quotaFor(account) {
-    const config = account?.config ?? account;
-    return Number(config?.quotaPerDay ?? this.gateway.defaultQuotaPerDay ?? 200);
-  }
-
-  /** Resolve every account's token up front so /status is meaningful immediately. */
-  async init() {
-    const enabled = [...this.accounts.values()].filter((a) => a.enabled);
-    this.tokenManager = new TokenManager(
-      enabled.map((a) => a.config),
-      this.tokenOptions,
-    );
-
-    await Promise.allSettled(
-      enabled.map(async (account) => {
-        try {
-          const auth = await this.getAuth(account);
-          account.ready = true;
-          account.error = null;
-          this.logger.log(
-            `🔑 ${account.name}: ${auth.email || 'unknown email'} · org ${auth.orgId || 'n/a'} · token ${auth.tokenPreview}`,
-          );
-        } catch (error) {
-          account.ready = false;
-          account.error = error.message;
-          this.logger.warn(`⚠️  ${account.name}: ${error.message}`);
-        }
-      }),
-    );
-
-    await this.refreshAllQuotas();
-    return this.getStatus();
-  }
-
-  /** Return a bearer token (and org id) for one account, refreshing when needed. */
-  async getAuth(account, { force = false } = {}) {
-    const value = await this.tokenManager.getToken(account.config, { force });
-    const auth = {
-      token: value.token,
-      orgId: value.orgId || null,
-      email: value.email || account.config.email || null,
-      type: value.type,
-      tokenPreview: null,
-    };
-    account.auth = auth;
-    return auth;
-  }
-
-  /** Build the headers the hosted API expects. */
-  authHeaders(auth) {
-    const headers = {
-      Authorization: `Bearer ${auth.token}`,
-      'User-Agent': this.upstream.userAgent,
-    };
-    if (auth.orgId) headers['x-opencode-org-id'] = auth.orgId;
-    return headers;
-  }
-
-  /**
-   * Read real quota for one account from the hosted usage endpoint.
-   * Percentages and `limited` come from the provider, so the gateway stops
-   * spending requests on an account that cannot serve them.
-   */
-  async refreshQuota(account) {
-    if (!account?.enabled) return null;
-
-    let auth;
+  
+  // Try servers in order
+  for (const account of accounts) {
+    const server = servers.get(account.id);
+    if (!server || !server.password) continue;
+    
+    if (account.quotaUsed >= account.quotaLimit) continue;
+    
     try {
-      auth = await this.getAuth(account);
-    } catch (error) {
-      account.ready = false;
-      account.error = error.message;
-      account.stats.lastQuotaError = error.message;
-      return null;
-    }
-
-    if (!auth.orgId) {
-      account.stats.lastQuotaError = 'credential has no orgID, cannot read usage';
-      return null;
-    }
-
-    try {
-      const response = await (this.options.fetchImpl || globalThis.fetch)(this.upstream.usageUrl, {
-        headers: this.authHeaders(auth),
-        signal: AbortSignal.timeout(15_000),
+      const response = await fetch(`${server.url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${server.password}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ model, messages })
       });
-
-      if (response.status === 403) {
-        account.stats.lastQuotaError = 'usage endpoint not available for this plan (403)';
-        account.stats.lastQuotaAt = new Date().toISOString();
-        return null;
-      }
+      
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        if (response.status === 429) {
+          account.quotaUsed = account.quotaLimit;
+          continue;
+        }
+        throw new Error(text);
       }
+      
+      const data = await response.json();
+      account.quotaUsed++;
+      
+      data._meta = {
+        account_id: account.id,
+        account_email: account.email,
+        quota_remaining: account.quotaLimit - account.quotaUsed
+      };
+      
+      return res.json(data);
+      
+    } catch (err) {
+      continue;
+    }
+  }
+  
+  return res.status(429).json({
+    error: { message: 'All accounts exhausted' }
+  });
+});
 
-      const payload = await response.json();
-      const usage = normaliseUsage(payload?.usage);
-      account.stats.usage = usage;
-      account.stats.lastQuotaAt = new Date().toISOString();
-      account.stats.lastQuotaError = null;
-
-      const limited = [usage.rolling, usage.weekly, usage.monthly].some((bucket) => bucket?.limited === true);
-      account.stats.limited = limited;
-      account.stats.limitedResetsAt = limited ? latestReset([usage.rolling, usage.weekly, usage.monthly]) : null;
-
-      if (limited) {
-        const until = account.stats.limitedResetsAt || Date.now() + this.gateway.cooldownOn429Ms;
-        account.stats.cooldownUntil = Math.max(account.stats.cooldownUntil, until);
-        this.logger.warn(
-          `⚠️  ${account.name} is quota-limited (rolling ${pct(usage.rolling)}, weekly ${pct(usage.weekly)}, monthly ${pct(usage.monthly)})` +
-            (account.stats.limitedResetsAt ? ` until ${new Date(account.stats.limitedResetsAt).toISOString()}` : ''),
-        );
+/**
+ * Web UI
+ */
+app.get('/', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OpenCode Account Manager</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+    h1 {
+      color: #667eea;
+      font-size: 2em;
+      margin-bottom: 10px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+    }
+    .account-list {
+      list-style: none;
+    }
+    .account-item {
+      background: #f8f9fa;
+      border-left: 4px solid #667eea;
+      padding: 20px;
+      margin: 15px 0;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .account-item.add-new {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+      color: white;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .account-item.add-new:hover {
+      transform: translateY(-2px);
+    }
+    .account-info h3 {
+      margin-bottom: 5px;
+      font-size: 1.2em;
+    }
+    .account-info p {
+      color: #666;
+      font-size: 0.9em;
+    }
+    .account-item.add-new .account-info h3,
+    .account-item.add-new .account-info p {
+      color: white;
+    }
+    .badge {
+      background: #d4edda;
+      color: #155724;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 0.85em;
+      font-weight: 600;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+    .stat-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 2.5em;
+      font-weight: 700;
+    }
+    .stat-label {
+      font-size: 0.9em;
+      opacity: 0.9;
+      margin-top: 5px;
+    }
+    .instructions {
+      background: #e7f3ff;
+      border-left: 4px solid #2196f3;
+      padding: 20px;
+      border-radius: 8px;
+      margin-top: 20px;
+    }
+    .instructions h3 {
+      color: #1976d2;
+      margin-bottom: 10px;
+    }
+    .instructions ol {
+      margin-left: 20px;
+      color: #555;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s ease-in-out infinite;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>🚀 OpenCode Account Manager</h1>
+      <p class="subtitle">Automatic account rotation - Up to 600 req/day</p>
+      
+      <ul class="account-list" id="accounts">
+        <li class="account-item add-new" onclick="addAccount()" id="add-btn">
+          <div class="account-info">
+            <h3>+ Add Account</h3>
+            <p>Click to connect a new OpenCode account</p>
+          </div>
+        </li>
+      </ul>
+      
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-value" id="total-accounts">0</div>
+          <div class="stat-label">Accounts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="total-capacity">0</div>
+          <div class="stat-label">Capacity/day</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="slots-left">3</div>
+          <div class="stat-label">Slots Left</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="card">
+      <div class="instructions">
+        <h3>✅ How It Works:</h3>
+        <ol>
+          <li>Click <strong>"Add Account"</strong> above</li>
+          <li>Terminal opens → Type <strong>/connect</strong></li>
+          <li>Login with your email → Authorize</li>
+          <li>Close terminal → Account appears here</li>
+          <li>Repeat for more accounts (max 3)</li>
+          <li>Use gateway: <code>http://localhost:3100/v1</code></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    let adding = false;
+    
+    async function loadAccounts() {
+      const res = await fetch('/accounts');
+      const data = await res.json();
+      
+      let html = '';
+      
+      // Show "Add Account" button if slots available
+      if (data.can_add_more && !adding) {
+        html += \`
+          <li class="account-item add-new" onclick="addAccount()">
+            <div class="account-info">
+              <h3>+ Add Account</h3>
+              <p>Click to connect a new OpenCode account</p>
+            </div>
+          </li>
+        \`;
+      } else if (adding) {
+        html += \`
+          <li class="account-item add-new">
+            <div class="account-info">
+              <h3><span class="loading"></span> Setting up...</h3>
+              <p>Complete setup in the terminal window</p>
+            </div>
+          </li>
+        \`;
       }
-
-      return usage;
-    } catch (error) {
-      account.stats.lastQuotaError = error.message;
-      this.logger.warn(`⚠️  Could not read usage for ${account.name}: ${error.message}`);
-      return null;
-    }
-  }
-
-  async refreshAllQuotas() {
-    await Promise.allSettled([...this.accounts.values()].map((account) => this.refreshQuota(account)));
-  }
-
-  startQuotaPolling() {
-    if (this.quotaTimer) return;
-    const interval = Number(this.gateway.quotaRefreshMs);
-    if (!Number.isFinite(interval) || interval <= 0) return;
-
-    this.quotaTimer = setInterval(() => {
-      this.refreshAllQuotas().catch(() => {});
-    }, interval);
-    this.quotaTimer.unref?.();
-  }
-
-  stopQuotaPolling() {
-    if (this.quotaTimer) {
-      clearInterval(this.quotaTimer);
-      this.quotaTimer = null;
-    }
-  }
-
-  /**
-   * Atomically reserve one account for a request.
-   * The `inFlight` increment happens synchronously, before any await, so two
-   * concurrent requests can never be handed the same free slot.
-   */
-  selectAccount(excludeNames = new Set()) {
-    const now = Date.now();
-    const strategy = this.gateway.selectionStrategy || 'lowest-usage';
-    const candidates = [];
-
-    for (const account of this.accounts.values()) {
-      if (!account.enabled || !account.ready) continue;
-      if (excludeNames.has(account.name)) continue;
-      if (account.stats.fundsExhausted) continue;
-      if (account.stats.cooldownUntil > now) continue;
-
-      // Recover automatically once a provider-reported limit window has passed.
-      if (account.stats.limited === true) {
-        const resetsAt = account.stats.limitedResetsAt;
-        if (!resetsAt || resetsAt > now) continue;
-        account.stats.limited = null;
-        account.stats.limitedResetsAt = null;
-      }
-
-      const used = account.stats.requestsToday + account.stats.inFlight;
-      if (used >= this.quotaFor(account)) continue;
-
-      candidates.push({ account, used });
-    }
-
-    if (candidates.length === 0) return null;
-
-    let chosen;
-    if (strategy === 'round-robin') {
-      chosen = candidates[this.roundRobinIndex % candidates.length].account;
-      this.roundRobinIndex = (this.roundRobinIndex + 1) % candidates.length;
-    } else {
-      candidates.sort((a, b) => a.used - b.used || a.account.name.localeCompare(b.account.name));
-      chosen = candidates[0].account;
-    }
-
-    chosen.stats.inFlight++; // reserve before returning
-    return chosen;
-  }
-
-  /**
-   * Release a reservation taken by selectAccount().
-   * Must be called exactly once per request.
-   */
-  releaseAccount(account, { consumed = false, error = null, errorCode = null, cooldownMs = 0, limited = null, status = null } = {}) {
-    if (!account) return;
-    const target = this.accounts.get(account.name) || account;
-
-    target.stats.inFlight = Math.max(0, target.stats.inFlight - 1);
-    if (consumed) {
-      target.stats.requestsToday++;
-      target.stats.lastUsedAt = new Date().toISOString();
-      this.markStateDirty();
-    }
-    if (status !== null) target.stats.lastStatus = status;
-    if (error) {
-      target.stats.failures++;
-      target.stats.lastError = String(error).slice(0, 500);
-      target.stats.lastErrorCode = errorCode;
-    }
-    if (limited !== null) target.stats.limited = limited;
-    if (cooldownMs > 0) {
-      target.stats.cooldownUntil = Math.max(target.stats.cooldownUntil, Date.now() + cooldownMs);
-    }
-  }
-
-  getStatus() {
-    const now = Date.now();
-    const status = {
-      upstream: { ...this.upstream },
-      totalAccounts: this.accounts.size,
-      ready: 0,
-      available: 0,
-      accounts: [],
-    };
-
-    for (const account of this.accounts.values()) {
-      const quota = this.quotaFor(account);
-      const used = account.stats.requestsToday + account.stats.inFlight;
-      const cooling = account.stats.cooldownUntil > now;
-      const available = account.enabled && account.ready && !cooling && !account.stats.fundsExhausted && account.stats.limited !== true && used < quota;
-
-      if (account.enabled && account.ready) status.ready++;
-      if (available) status.available++;
-
-      status.accounts.push({
-        name: account.name,
-        email: account.auth?.email ?? account.config.email ?? null,
-        orgId: account.auth?.orgId ?? account.config.orgId ?? null,
-        enabled: account.enabled,
-        ready: account.ready,
-        available,
-        error: account.error,
-        token: this.tokenManager?.describe(account.config) ?? null,
-        quotaPerDay: quota,
-        used,
-        remaining: Math.max(0, quota - used),
-        stats: account.stats,
+      
+      // Show connected accounts
+      data.accounts.forEach(acc => {
+        html += \`
+          <li class="account-item">
+            <div class="account-info">
+              <h3>Account \${acc.id}: \${acc.email}</h3>
+              <p>Port: \${acc.port} | Quota: \${acc.quota}</p>
+            </div>
+            <span class="badge">\${acc.status}</span>
+          </li>
+        \`;
       });
+      
+      document.getElementById('accounts').innerHTML = html;
+      document.getElementById('total-accounts').textContent = data.slots_used;
+      document.getElementById('total-capacity').textContent = data.total_capacity;
+      document.getElementById('slots-left').textContent = 3 - data.slots_used;
     }
-
-    return status;
-  }
-
-  resetDailyQuota({ reason = 'scheduled' } = {}) {
-    this.logger.log(`\n🔄 Resetting daily request counters (${reason})...`);
-    for (const account of this.accounts.values()) {
-      const before = account.stats.requestsToday;
-      account.stats.requestsToday = 0;
-      account.stats.lastReset = new Date().toISOString();
-      if (before > 0) this.logger.log(`  ${account.name}: ${before} requests yesterday`);
-    }
-    this.markStateDirty();
-  }
-
-  // --- small persistence layer: keeps counters across restarts ---------------
-
-  get statePath() {
-    const file = this.gateway.stateFile;
-    if (!file) return null;
-    return path.isAbsolute(file) ? file : path.join(path.dirname(this.configPath), file);
-  }
-
-  loadState() {
-    const file = this.statePath;
-    if (!file || !fs.existsSync(file)) return;
-    try {
-      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (state?.date !== utcDay()) return; // counters belong to a previous day
-      for (const [name, saved] of Object.entries(state.accounts || {})) {
-        const account = this.accounts.get(name);
-        if (!account) continue;
-        if (Number.isFinite(saved.requestsToday)) account.stats.requestsToday = saved.requestsToday;
-        if (Number.isFinite(saved.failures)) account.stats.failures = saved.failures;
-        if (typeof saved.lastUsedAt === 'string') account.stats.lastUsedAt = saved.lastUsedAt;
+    
+    async function addAccount() {
+      if (adding) return;
+      
+      adding = true;
+      loadAccounts();
+      
+      try {
+        const res = await fetch('/accounts/add', { method: 'POST' });
+        const data = await res.json();
+        
+        if (!res.ok) {
+          alert(data.error || 'Error adding account');
+          adding = false;
+          loadAccounts();
+          return;
+        }
+        
+        alert(
+          '🚀 Setup Started!\\n\\n' +
+          'A terminal window opened.\\n' +
+          'Type: /connect\\n' +
+          'Login with your email\\n\\n' +
+          'This page will refresh when you\\'re done.'
+        );
+        
+        // Poll for new account
+        const pollInterval = setInterval(async () => {
+          const statusRes = await fetch('/accounts');
+          const statusData = await statusRes.json();
+          
+          if (statusData.slots_used > 0) {
+            adding = false;
+            clearInterval(pollInterval);
+            loadAccounts();
+          }
+        }, 3000);
+        
+        // Timeout after 5 minutes
+        setTimeout(() => {
+          adding = false;
+          clearInterval(pollInterval);
+          loadAccounts();
+        }, 300000);
+        
+      } catch (err) {
+        alert('Error: ' + err.message);
+        adding = false;
+        loadAccounts();
       }
-    } catch (error) {
-      this.logger.warn(`⚠️  Ignoring unreadable state file ${file}: ${error.message}`);
     }
-  }
+    
+    loadAccounts();
+    setInterval(loadAccounts, 5000);
+  </script>
+</body>
+</html>
+  `);
+});
 
-  markStateDirty() {
-    this.stateDirty = true;
-    if (this.stateTimer) return;
-    this.stateTimer = setTimeout(() => {
-      this.stateTimer = null;
-      this.persistState();
-    }, 1000);
-    this.stateTimer.unref?.();
-  }
+console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                                                            ║
+║  🚀 OpenCode Account Manager                              ║
+║                                                            ║
+║  Automatic Setup - Like Kiro/Codex                        ║
+║                                                            ║
+╚════════════════════════════════════════════════════════════╝
 
-  persistState() {
-    const file = this.statePath;
-    if (!file || !this.stateDirty) return;
-    this.stateDirty = false;
+Starting...
+`);
 
-    const payload = {
-      version: 1,
-      date: utcDay(),
-      updatedAt: new Date().toISOString(),
-      accounts: Object.fromEntries(
-        [...this.accounts.values()].map((account) => [
-          account.name,
-          {
-            requestsToday: account.stats.requestsToday,
-            failures: account.stats.failures,
-            lastUsedAt: account.stats.lastUsedAt,
-          },
-        ]),
-      ),
-    };
-
-    try {
-      fs.writeFileSync(file, JSON.stringify(payload, null, 2));
-    } catch (error) {
-      this.logger.warn(`⚠️  Could not persist state to ${file}: ${error.message}`);
-    }
-  }
-
-  async stop() {
-    this.stopQuotaPolling();
-    if (this.stateTimer) {
-      clearTimeout(this.stateTimer);
-      this.stateTimer = null;
-    }
-    this.persistState();
-    this.tokenManager?.close();
-  }
-}
-
-function normaliseUsage(usage) {
-  const bucket = (value) => {
-    if (!value || typeof value !== 'object') return null;
-    const resetsAt = value.resetsAt ? Date.parse(value.resetsAt) : null;
-    return {
-      percent: Number.isFinite(value.percent) ? value.percent : null,
-      limited: value.status === 'rate-limited' || value.limited === true,
-      status: value.status ?? null,
-      resetsAt: Number.isFinite(resetsAt) ? resetsAt : null,
-    };
-  };
-  return {
-    rolling: bucket(usage?.rolling),
-    weekly: bucket(usage?.weekly),
-    monthly: bucket(usage?.monthly),
-  };
-}
-
-function latestReset(buckets) {
-  const stamps = buckets.map((b) => b?.resetsAt).filter((v) => Number.isFinite(v));
-  return stamps.length ? Math.max(...stamps) : null;
-}
-
-function pct(bucket) {
-  return bucket?.percent === null || bucket?.percent === undefined ? 'n/a' : `${bucket.percent}%`;
-}
-
-export { TokenError };
-export default AccountManager;
+app.listen(MANAGER_PORT, () => {
+  const accounts = discoverAccounts();
+  
+  // Auto-start servers for existing accounts
+  accounts.forEach(acc => {
+    startOpenCodeServer(acc);
+  });
+  
+  console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                                                            ║
+║  ✅ Account Manager Ready!                                ║
+║                                                            ║
+║  🎛️  Web UI: http://localhost:${MANAGER_PORT}/                         ║
+║  📡 Gateway API: http://localhost:${MANAGER_PORT}/v1                   ║
+║                                                            ║
+║  📊 Current Accounts: ${accounts.length}/3                             ║
+║  📈 Total Capacity: ${accounts.length * 200} req/day                       ║
+║                                                            ║
+║  💡 Open http://localhost:${MANAGER_PORT} to add accounts!           ║
+║                                                            ║
+╚════════════════════════════════════════════════════════════╝
+  `);
+});
