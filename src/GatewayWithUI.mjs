@@ -210,9 +210,20 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 /**
+ * Reload accounts from disk
+ */
+function reloadAccounts() {
+  accounts.length = 0; // Clear array
+  loadAccounts(); // Reload from disk
+}
+
+/**
  * Account management UI
  */
 app.get('/accounts', (req, res) => {
+  // Reload accounts to detect new ones
+  reloadAccounts();
+  
   res.json({
     accounts: accounts.map(a => ({
       id: a.id,
