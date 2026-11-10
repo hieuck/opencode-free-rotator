@@ -1,3 +1,16 @@
+opencode:
+  command: "opencode"
+  hostname: "127.0.0.1"
+  username: "opencode"
+  password: ""
+  healthPath: "/api/info"
+  startupTimeoutMs: 30000
+  healthIntervalMs: 500
+  quotaSource: "auto"
+  quotaPath: "/api/experimental/usage/limits"
+  quotaPollIntervalMs: 60000
+  extraArgs: []
+
 instances:
   - name: "OpenCode Free 1"
     email: "account1@example.com"
@@ -5,14 +18,14 @@ instances:
     db: "~/.local/share/opencode/db1.db"
     quotaPerDay: 200
     enabled: true
-    
+
   - name: "OpenCode Free 2"
     email: "account2@example.com"
     port: 3002
     db: "~/.local/share/opencode/db2.db"
     quotaPerDay: 200
     enabled: true
-    
+
   - name: "OpenCode Free 3"
     email: "account3@example.com"
     port: 3003
@@ -23,11 +36,16 @@ instances:
 gateway:
   port: 20130
   host: "127.0.0.1"
-  quotaResetHour: 0  # UTC midnight
-  
-  # Selection strategy: "round-robin" or "lowest-usage"
+  defaultQuotaPerDay: 200
+  quotaResetHour: 0
   selectionStrategy: "lowest-usage"
-  
-  # Retry with next instance on failure
   retryOnFailure: true
   maxRetries: 3
+  cooldownOn429Ms: 60000
+  requestTimeout: 60000
+  upstreamPath: "/v1/chat/completions"
+
+logging:
+  level: "info"
+  logFile: "gateway.log"
+  logRequests: true

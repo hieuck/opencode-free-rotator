@@ -1,6 +1,10 @@
 # OpenCode Free Rotator
 
-**Production-ready gateway** to bypass OpenCode free tier 200 req/day limit through multi-instance pooling.
+⚠️ **Status: Research Project - Not Production Ready**
+
+**Goal:** Gateway to bypass OpenCode free tier 200 req/day limit through multi-instance pooling.
+
+**Current Status:** Architecture designed and implemented, but **core functionality blocked** by API incompatibility. See [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for details.
 
 ```
 Gateway → OpenCode Instance 1 (200 req/day)
@@ -14,15 +18,52 @@ Total: 600 req/day with 3 accounts
 
 Scale OpenCode free tier usage by rotating multiple accounts, each with isolated OpenCode server instances.
 
-## ✅ Status: Production Ready
+## 🚧 Implementation Status
 
 - ✅ Phase 1: OAuth token research complete
-- ✅ Phase 2: Multi-instance solution confirmed
+- ✅ Phase 2: Multi-instance architecture designed
 - ✅ Phase 3: Instance manager implemented
 - ✅ Phase 4: Gateway proxy implemented
-- ⏳ Phase 5: Production deployment (optional)
+- ✅ Phase 5: Production deployment configs ready
+- ❌ **BLOCKER:** Local OpenCode servers don't expose `/v1/chat/completions`
+
+## ⚠️ Critical Issue
+
+**Problem:** The gateway forwards requests to `/v1/chat/completions` on local OpenCode servers, but this endpoint **does not exist locally**.
+
+**Reality Check:**
+- ✅ Local OpenCode server starts successfully
+- ✅ Exposes native API: `/api/session`, `/api/session/:id/message`
+- ❌ Does NOT expose OpenAI-compatible `/v1/chat/completions`
+- ❌ Gateway cannot forward requests (endpoint doesn't exist)
+
+**See:** [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for full technical details.
+
+## 🎯 Possible Solutions
+
+### Option A: Implement Translation Layer (Complex)
+Build an OpenAI → OpenCode API adapter:
+- Map Chat Completions to OpenCode's `/api/session` + `/api/message`
+- Handle authentication (HTTP Basic)
+- Support streaming (SSE)
+- **Effort:** 8-16 hours
+- **Status:** Not started
+
+### Option B: Use Hosted API (Recommended)
+Pool accounts hitting OpenCode's hosted API directly:
+- Extract OAuth tokens from SQLite DBs
+- Forward to `https://api.opencode.ai/v1/chat/completions`
+- Track quota per account
+- **Effort:** 4-8 hours
+- **Status:** Not started
+
+### Option C: Document as Research
+Mark as research project and document findings:
+- **Status:** ✅ Done (this README)
 
 ## 🚀 Quick Start
+
+**Note:** Current implementation is non-functional due to API incompatibility. Do not attempt to deploy.
 
 ```bash
 # 1. Install
@@ -102,6 +143,17 @@ npm run instances:reset-quota  # Reset daily quotas
 # Development
 npm test                       # Run tests (TBD)
 ```
+
+## 🏆 What Was Accomplished
+
+✅ **Complete architecture design** - Multi-instance pooling approach  
+✅ **Instance manager** - Spawn/manage multiple OpenCode servers  
+✅ **Gateway proxy** - HTTP server with routing logic  
+✅ **Quota tracking** - Per-instance usage and reset  
+✅ **Production configs** - systemd, PM2, Docker ready  
+✅ **Comprehensive docs** - 5 detailed guides  
+✅ **Code review** - DeepSeek v4.1 validation  
+❌ **Core functionality** - Blocked by API incompatibility
 
 ## 📚 Documentation
 

@@ -45,8 +45,13 @@ async function main() {
         console.log(`   Port: ${inst.port}`);
         
         if (inst.stats) {
-          const quota = manager.config.instances.find(i => i.port === inst.port).quotaPerDay;
-          console.log(`   Quota: ${inst.stats.requestsToday}/${quota} today`);
+          console.log(`   Quota: ${inst.stats.requestsToday}/${inst.quotaPerDay} today (in flight: ${inst.stats.inFlight})`);
+          if (inst.stats.limited !== null) {
+            console.log(`   Account limited: ${inst.stats.limited ? 'yes' : 'no'}`);
+          }
+          if (inst.stats.lastQuotaError) {
+            console.log(`   Usage warning: ${inst.stats.lastQuotaError}`);
+          }
           console.log(`   Started: ${new Date(inst.stats.startedAt).toLocaleString()}`);
         }
         console.log('');
@@ -58,15 +63,17 @@ async function main() {
     case 'test-select':
       console.log('\n🧪 Testing instance selection...\n');
       const selected = manager.selectInstance();
-      
+
       if (selected) {
         console.log(`✅ Selected: ${selected.config.name}`);
         console.log(`   Port: ${selected.config.port}`);
-        console.log(`   Usage: ${selected.stats.requestsToday}/${selected.config.quotaPerDay}`);
+        console.log(`   Usage: ${selected.stats.requestsToday + selected.stats.inFlight}/${manager.quotaFor(selected)}`);
+        // Release the reservation taken by selectInstance().
+        manager.releaseInstance(selected);
       } else {
-        console.log('❌ No instances available (all quota exhausted)');
+        console.log('❌ No instances available (not running, quota exhausted, or rate limited)');
       }
-      
+
       process.exit(0);
       break;
 
