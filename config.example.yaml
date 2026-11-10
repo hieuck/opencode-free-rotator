@@ -1,107 +1,110 @@
-# OpenCode Free Rotator - Configuration Example
+# OpenCode Free Rotator — configuration example
+#
+# Architecture: hosted API pooling.
+#   Each account is an OAuth credential inside an OpenCode SQLite database.
+#   The gateway reads those tokens and forwards OpenAI-compatible requests to
+#   https://opencode.ai/inference/openai/v1, rotating accounts as free quota runs
+#   out. No `opencode serve` process is started and no extra port per account is
+#   needed.
 #
 # Before running:
-# 1. Create 3+ OpenCode free accounts (separate emails)
-# 2. Authenticate each account once so its credentials land in that account's DB.
-#    The rotator gives every instance its own OPENCODE_DB, so every instance has
-#    its own account and its own quota.
-# 3. Start the gateway: node server.mjs
+#   1. Authenticate each account once:  opencode auth login
+#   2. Point every entry below at the DB holding that account's credential.
+#      By default OpenCode uses ~/.local/share/opencode/opencode.db
+#      (macOS: ~/Library/Application Support/opencode/opencode.db).
+#   3. node cli.mjs status      # verifies tokens + real quota, starts nothing
+#   4. node server.mjs          # starts the gateway
 
-# ---------------------------------------------------------------------------
-# How the rotator launches `opencode serve` (all keys optional)
-# ---------------------------------------------------------------------------
-opencode:
-  # Executable to run. Use an absolute path if opencode is not on PATH.
-  command: "opencode"
+upstream:
+  # Base URL the gateway forwards to. This is what OpenCode itself uses.
+  baseUrl: "https://opencode.ai/inference/openai/v1"
+  chatPath: "/chat/completions"
+  modelsPath: "/models"
 
-  # Address each spawned server binds to. Keep 127.0.0.1 unless you must expose it.
-  hostname: "127.0.0.1"
+  # Per-organization quota buckets (rolling / weekly / monthly).
+  # Requests need the `x-opencode-org-id` header, which is read from the credential.
+  usageUrl: "https://opencode.ai/zen/go/v1/usage"
 
-  # `opencode serve` protects every /api/* route with HTTP Basic auth, so the
-  # gateway needs credentials. The rotator generates a random per-instance
-  # password by default; set one here to pin it, or "auto" to let opencode
-  # generate it (the rotator parses "server password ..." from stdout).
-  username: "opencode"
-  password: ""
+  # Sent as User-Agent on every upstream call.
+  userAgent: "opencode/2.2.6"
 
-  # Readiness probe. `/api/info` returns JSON; `/health` returns the web UI HTML
-  # and must NOT be used here.
-  healthPath: "/api/info"
-  startupTimeoutMs: 30000
-  healthIntervalMs: 500
+  # Timeout for one completion. Streaming needs headroom.
+  timeoutMs: 120000
 
-  # Real quota source. `/api/experimental/usage/limits` reports the account's
-  # rolling/weekly/monthly percentages and whether it is currently limited.
-  # Use "local" to rely only on quotaPerDay counters, or "off" to disable.
-  quotaSource: "auto"
-  quotaPath: "/api/experimental/usage/limits"
-  quotaPollIntervalMs: 60000
-
-  # Extra arguments appended to `serve --port <port> --hostname <host>`.
-  extraArgs: []
-
-# ---------------------------------------------------------------------------
-# Instances - one OpenCode account per instance
-# ---------------------------------------------------------------------------
-instances:
+accounts:
   - name: "OpenCode Free 1"
     email: "your-email-1@example.com"
-    port: 3001
-    db: "~/.local/share/opencode/db1.db"
+    # OpenCode SQLite database that holds this account's `opencode` credential.
+    db: "~/.local/share/opencode/opencode.db"
+    # Credential integration id (default: opencode).
+    integrationId: "opencode"
+    # Local safety-net counter. The real free quota is enforced and reported by
+    # the provider; this only prevents a runaway loop from hammering one account.
     quotaPerDay: 200
     enabled: true
-    # password: "instance-specific-secret"   # optional per-instance override
+    # orgId: "wrk_..."        # optional override; normally read from the credential
 
-  - name: "OpenCode Free 2"
-    email: "your-email-2@example.com"
-    port: 3002
-    db: "~/.local/share/opencode/db2.db"
-    quotaPerDay: 200
-    enabled: true
+  # Second account = second database (a copy of an authenticated DB, or a
+  # separate OpenCode profile).
+  # - name: "OpenCode Free 2"
+  #   email: "your-email-2@example.com"
+  #   db: "~/.local/share/opencode/db2.db"
+  #   quotaPerDay: 200
+  #   enabled: true
 
-  - name: "OpenCode Free 3"
-    email: "your-email-3@example.com"
-    port: 3003
-    db: "~/.local/share/opencode/db3.db"
-    quotaPerDay: 200
-    enabled: true
+  # Static token accounts are also supported (useful for CI / smoke tests):
+  # - name: "CI token"
+  #   token: "st_..."
+  #   orgId: "wrk_..."
+  #   enabled: true
 
-# ---------------------------------------------------------------------------
-# Gateway settings
-# ---------------------------------------------------------------------------
 gateway:
   port: 20130
   host: "127.0.0.1"
 
-  # Fallback daily counter limit for instances without their own quotaPerDay.
+  # Fallback daily counter limit for accounts without their own quotaPerDay.
   defaultQuotaPerDay: 200
 
-  # Daily quota reset time (UTC hour, 0-23). 0 = midnight UTC.
-  quotaResetHour: 0
-
-  # Instance selection strategy:
-  # - "lowest-usage": least used instance first (recommended)
-  # - "round-robin": rotate through available instances
+  # Account selection:
+  # - "lowest-usage": fewest requests first (recommended)
+  # - "round-robin": rotate through available accounts
   selectionStrategy: "lowest-usage"
 
-  # Retry with another instance if one fails.
+  # Fail over to another account on 401 / 402 / 429 / 5xx.
   retryOnFailure: true
   maxRetries: 3
 
-  # How long (ms) an instance is skipped after it answers 429.
-  # Retry-After / retryAfterMs from the instance take precedence.
+  # Cooldown after a 429 that carries no reset information (ms).
   cooldownOn429Ms: 60000
 
-  # Timeout for forwarded requests (milliseconds).
-  requestTimeout: 60000
+  # Timeout for forwarded requests (ms).
+  requestTimeout: 120000
 
-  # Path the gateway forwards OpenAI-style requests to.
-  # NOTE: OpenCode v2 does not provide /v1/chat/completions. See
-  # docs/OPENCODE_API_FINDINGS.md before changing this.
-  upstreamPath: "/v1/chat/completions"
+  # Re-read provider quota this often (ms). 0 disables polling.
+  quotaRefreshMs: 300000
 
-# Logging
+  # Local counters survive restarts; set to null to keep them in memory only.
+  stateFile: ".rotator-state.json"
+
+  # Optional: UTC hour for the local counter reset (default 0 = midnight UTC).
+  # quotaResetHour: 0
+
+tokens:
+  # Re-read the credential row this often so tokens refreshed by `opencode`
+  # itself are picked up automatically (ms).
+  cacheTtlMs: 15000
+
+  # Refresh this long before the access token expires (ms).
+  refreshSkewMs: 120000
+
+  # Write a rotated token pair back into the OpenCode DB. Keep enabled: the
+  # provider rotates refresh tokens, so skipping this would eventually log the
+  # desktop app out.
+  writeBack: true
+
+  # OAuth client id used by OpenCode's device/refresh flow.
+  clientId: "opencode-cli"
+
 logging:
-  level: "info"  # debug, info, warn, error
-  logFile: "gateway.log"
+  level: "info" # debug, info, warn, error
   logRequests: true

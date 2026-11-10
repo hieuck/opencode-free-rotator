@@ -32,7 +32,7 @@ console.log(`
 ║                                                           ║
 ║        OpenCode Free Rotator Gateway                      ║
 ║                                                           ║
-║  Multi-instance pooling for OpenCode free tier            ║
+║  Hosted API pooling for the OpenCode free tier            ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
 `);

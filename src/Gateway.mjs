@@ -1,8 +1,9 @@
 import http from 'http';
 import { Readable } from 'stream';
-import { InstanceManager } from './InstanceManager.mjs';
+import { AccountManager, TokenError } from './AccountManager.mjs';
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB guard against unbounded bodies
+const MODELS_CACHE_MS = 5 * 60 * 1000;
 
 // Headers we must not copy verbatim from the upstream response.
 const STRIPPED_RESPONSE_HEADERS = new Set([
@@ -14,20 +15,29 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
 ]);
 
 /**
- * Gateway proxy that forwards OpenAI-style requests to OpenCode instances.
+ * Gateway that pools OpenCode accounts against the hosted, OpenAI-compatible
+ * inference API (`https://opencode.ai/inference/openai/v1`).
+ *
+ * It owns no child processes: every request is forwarded with the account's
+ * bearer token, and quota comes from the provider's real usage endpoint.
  */
 export class Gateway {
-  constructor(configPath) {
-    this.manager = new InstanceManager(configPath);
+  constructor(configPath, options = {}) {
+    this.manager = new AccountManager(configPath, options);
     this.server = null;
+    this.modelsCache = null;
   }
 
   get gatewayConfig() {
-    return this.manager.config.gateway;
+    return this.manager.gateway;
+  }
+
+  get upstream() {
+    return this.manager.upstream;
   }
 
   async start() {
-    await this.manager.startAll();
+    const status = await this.manager.init();
     this.manager.startQuotaPolling();
 
     const { host = '127.0.0.1', port } = this.gatewayConfig;
@@ -55,62 +65,18 @@ export class Gateway {
     });
 
     console.log(`\n🌐 Gateway listening on http://${host}:${port}`);
-    console.log(`📊 Forwarding to ${this.manager.instances.size} instances\n`);
+    console.log(`📊 Pooling ${status.totalAccounts} account(s) · ${status.available} available now\n`);
+
+    if (status.available === 0) {
+      console.warn(
+        '⚠️  No account can serve a request right now. Check /status — the usual causes are an\n' +
+          '    exhausted free quota (the provider reports a reset time) or a credential that needs\n' +
+          '    `opencode auth login`.\n',
+      );
+    }
 
     this.setupDailyReset();
-    await this.warnAboutUpstream();
-  }
-
-  /**
-   * Bug #3 guard: the upstream path the gateway forwards to may not exist on this
-   * OpenCode build. Detect it at startup and say so loudly instead of returning
-   * confusing per-request 404s. The translation layer is intentionally NOT
-   * implemented here — see docs/OPENCODE_API_FINDINGS.md for the decision.
-   */
-  async warnAboutUpstream() {
-    const upstreamPath = this.gatewayConfig.upstreamPath || '/v1/chat/completions';
-    const instance = [...this.manager.instances.values()].find((i) => i.ready);
-    if (!instance) return;
-
-    const url = `${this.manager.baseUrl(instance)}${upstreamPath}`;
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...this.manager.authHeader(instance) },
-        body: JSON.stringify({
-          model: 'probe',
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
-        }),
-        signal: AbortSignal.timeout(8000),
-      });
-      const contentType = response.headers.get('content-type') || '';
-      const reachable = contentType.includes('json');
-
-      if (reachable) {
-        console.log(`✅ Upstream ${upstreamPath} responded (HTTP ${response.status}, ${contentType})`);
-      } else {
-        this.logUpstreamWarning(upstreamPath, `HTTP ${response.status}, ${contentType || 'no content type'}`);
-      }
-    } catch (error) {
-      this.logUpstreamWarning(upstreamPath, error.message);
-    }
-  }
-
-  logUpstreamWarning(upstreamPath, detail) {
-    console.warn(`
-╔══════════════════════════════════════════════════════════════════════╗
-║  ⚠️  UPSTREAM ENDPOINT NOT AVAILABLE                                 ║
-╠══════════════════════════════════════════════════════════════════════╣
-║  The gateway forwards to: ${upstreamPath.padEnd(42)}║
-║  Result: ${String(detail).slice(0, 60).padEnd(60)}║
-║                                                                      ║
-║  OpenCode v2 does not expose an OpenAI-compatible endpoint.          ║
-║  Chat requests will fail until a translation layer is added or       ║
-║  gateway.upstreamPath is pointed at a supported endpoint.            ║
-║  See docs/OPENCODE_API_FINDINGS.md.                                  ║
-╚══════════════════════════════════════════════════════════════════════╝
-`);
+    return status;
   }
 
   /**
@@ -122,6 +88,7 @@ export class Gateway {
 
     if (pathname === '/health') return this.handleHealth(req, res);
     if (pathname === '/status') return this.handleStatus(req, res);
+    if (pathname === '/v1/models' && req.method === 'GET') return this.handleModels(req, res);
 
     if (pathname !== '/v1/chat/completions' || req.method !== 'POST') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -151,8 +118,11 @@ export class Gateway {
 
     if (result.success) {
       const duration = Date.now() - startTime;
-      if (this.manager.config.logging?.logRequests !== false) {
-        console.log(`✅ [${result.instance.config.name}] ${requestData.model ?? 'unknown-model'} - ${duration}ms`);
+      if (this.manager.logging.logRequests !== false) {
+        console.log(
+          `✅ [${result.account.name}] ${requestData.model ?? 'unknown-model'} - ${duration}ms ` +
+            `(${result.account.stats.requestsToday}/${this.manager.quotaFor(result.account)} today)`,
+        );
       }
       await this.pipeUpstream(result.upstream, res);
       return;
@@ -165,7 +135,7 @@ export class Gateway {
         error: {
           message: result.error,
           type: 'gateway_error',
-          code: result.code || 'all_instances_unavailable',
+          code: result.code || 'all_accounts_unavailable',
         },
       }),
     );
@@ -191,117 +161,191 @@ export class Gateway {
     });
   }
 
+  upstreamUrl(pathname) {
+    return `${this.upstream.baseUrl}${pathname}`;
+  }
+
+  /** POST one chat completion with an account's token, retrying once on 401. */
+  async sendUpstream(account, requestData) {
+    const { chatPath, timeoutMs } = this.upstream;
+
+    const attempt = async () => {
+      const auth = await this.manager.getAuth(account);
+      return fetch(this.upstreamUrl(chatPath), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.manager.authHeaders(auth),
+        },
+        body: JSON.stringify(requestData),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    };
+
+    let response = await attempt();
+    if (response.status !== 401) return response;
+
+    // The cached token was rejected: drop it and retry once with a fresh read/refresh.
+    await response.text().catch(() => '');
+    this.manager.tokenManager.invalidate(account.config);
+    response = await attempt();
+    return response;
+  }
+
   /**
-   * Forward a request to a selected instance, retrying on other instances.
+   * Forward a request to a selected account, failing over on auth/quota errors.
    * Every reservation is released exactly once.
    */
   async forwardRequest(requestData) {
-    const {
-      retryOnFailure = true,
-      maxRetries = 3,
-      requestTimeout = 60000,
-      upstreamPath = '/v1/chat/completions',
-      cooldownOn429Ms = 60000,
-    } = this.gatewayConfig;
+    const { retryOnFailure = true, maxRetries = 3, cooldownOn429Ms = 60000 } = this.gatewayConfig;
 
     const attempts = retryOnFailure ? Math.max(1, maxRetries) : 1;
     const tried = new Set();
-    let lastError = 'No instance available';
+    let lastError = 'No account available';
     let lastStatus = 503;
-    let lastCode = 'all_instances_unavailable';
+    let lastCode = 'all_accounts_unavailable';
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const instance = this.manager.selectInstance(tried);
-      if (!instance) {
+      const account = this.manager.selectAccount(tried);
+      if (!account) {
         if (tried.size === 0) {
-          const allLimited = [...this.manager.instances.values()].some((i) => i.stats.limited === true);
+          const accounts = [...this.manager.accounts.values()];
+          const limited = accounts.filter((a) => a.stats.limited === true || a.stats.fundsExhausted);
+          const notReady = accounts.filter((a) => a.enabled && !a.ready);
           return {
             success: false,
-            error: allLimited
-              ? 'All instances report their OpenCode quota as exhausted'
-              : 'No instance has remaining quota or is ready',
-            code: allLimited ? 'quota_exhausted' : 'no_instance_available',
-            statusCode: 429,
+            error:
+              limited.length > 0
+                ? `All accounts are out of free quota (${limited.map((a) => a.name).join(', ')}). ` +
+                  'The provider resets the window automatically; add more accounts to keep going.'
+                : notReady.length > 0
+                  ? `No account has a usable credential: ${notReady.map((a) => `${a.name} (${a.error})`).join('; ')}`
+                  : 'No account has remaining quota right now',
+            code: limited.length > 0 ? 'quota_exhausted' : notReady.length > 0 ? 'auth_required' : 'no_account_available',
+            statusCode: limited.length > 0 ? 429 : 503,
           };
         }
         break;
       }
 
-      tried.add(instance.port);
+      tried.add(account.name);
       let released = false;
       const release = (opts) => {
         if (released) return;
         released = true;
-        this.manager.releaseInstance(instance, opts);
+        this.manager.releaseAccount(account, opts);
       };
 
       try {
-        const response = await fetch(`${this.manager.baseUrl(instance)}${upstreamPath}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...this.manager.authHeader(instance),
-          },
-          body: JSON.stringify(requestData),
-          signal: AbortSignal.timeout(requestTimeout),
-        });
+        const response = await this.sendUpstream(account, requestData);
 
         if (response.ok) {
-          release({ consumed: true });
-          return { success: true, instance, upstream: response };
+          release({ consumed: true, status: response.status, error: null, limited: false });
+          return { success: true, account, upstream: response };
         }
 
         const errorText = await response.text().catch(() => '');
-        const detail = `${instance.config.name} returned ${response.status}${errorText ? `: ${errorText.slice(0, 300)}` : ''}`;
+        const detail = `${account.name} returned ${response.status}${errorText ? `: ${errorText.slice(0, 300)}` : ''}`;
         console.warn(`⚠️  ${detail}`);
 
         if (response.status === 429) {
-          const retryAfterMs = this.retryAfterMs(response, errorText, cooldownOn429Ms);
-          release({ error: detail, cooldownMs: retryAfterMs });
-          lastError = 'All instances are rate limited';
+          const kind = classifyLimit(errorText);
+          const retryAfter = this.retryAfterMs(response, errorText, 0);
+          const usageReset = account.stats.limitedResetsAt ? account.stats.limitedResetsAt - Date.now() : 0;
+          const cooldown = Math.max(retryAfter, usageReset, kind ? 0 : cooldownOn429Ms) || cooldownOn429Ms;
+
+          release({
+            error: detail,
+            errorCode: kind ? 'quota_exhausted' : 'rate_limited',
+            status: 429,
+            limited: true,
+            cooldownMs: cooldown,
+          });
+          lastError = 'All accounts are rate limited';
           lastStatus = 429;
           lastCode = 'quota_exhausted';
           continue;
         }
 
-        release({ error: detail });
+        if (response.status === 401 || response.status === 403) {
+          release({ error: detail, errorCode: 'auth_failed', status: response.status });
+          account.ready = false;
+          account.error = `Authentication failed (HTTP ${response.status}). Re-run \`opencode auth login\` for ${account.name}.`;
+          lastError = account.error;
+          lastStatus = 503;
+          lastCode = 'auth_required';
+          continue;
+        }
+
+        if (response.status === 402) {
+          release({
+            error: detail,
+            errorCode: 'insufficient_funds',
+            status: 402,
+            cooldownMs: 24 * 60 * 60 * 1000,
+          });
+          account.stats.fundsExhausted = true;
+          lastError = `${account.name} has insufficient account funds`;
+          lastStatus = 402;
+          lastCode = 'insufficient_funds';
+          continue;
+        }
+
+        if (response.status >= 500) {
+          release({ error: detail, errorCode: 'upstream_error', status: response.status });
+          lastError = errorText || `Upstream returned ${response.status}`;
+          lastStatus = response.status;
+          lastCode = 'upstream_error';
+          continue;
+        }
+
+        release({ error: detail, errorCode: 'upstream_error', status: response.status });
         return {
           success: false,
-          error: errorText || `Instance returned ${response.status}`,
+          error: errorText || `Upstream returned ${response.status}`,
           statusCode: response.status,
           code: 'upstream_error',
         };
       } catch (error) {
-        release({ error: error.message });
+        const tokenProblem = error instanceof TokenError;
+        release({
+          error: error.message,
+          errorCode: tokenProblem ? error.code : 'upstream_unreachable',
+          status: 503,
+        });
         lastError = error.message;
-        lastStatus = 503;
-        lastCode = 'upstream_unreachable';
-        console.error(`❌ Instance ${instance.config.name} error: ${error.message}`);
+        lastStatus = tokenProblem ? 503 : 502;
+        lastCode = tokenProblem ? 'auth_required' : 'upstream_unreachable';
+        console.error(`❌ Account ${account.name} error: ${error.message}`);
         if (attempt < attempts) {
-          console.log(`   Retrying with another instance (${attempt}/${attempts})...`);
+          console.log(`   Retrying with another account (${attempt}/${attempts})...`);
         }
       }
     }
 
     return {
       success: false,
-      error: `All instances failed: ${lastError}`,
+      error: `All accounts failed: ${lastError}`,
       statusCode: lastStatus,
       code: lastCode,
     };
   }
 
-  /** Honour Retry-After / retryAfterMs, otherwise use the configured cooldown. */
+  /** Honour Retry-After / retryAfterMs / resetsAt, otherwise fall back. */
   retryAfterMs(response, bodyText, fallbackMs) {
     const header = response.headers.get('retry-after');
     if (header) {
       const seconds = Number(header);
       if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+      const date = Date.parse(header);
+      if (Number.isFinite(date) && date > Date.now()) return date - Date.now();
     }
     try {
       const parsed = JSON.parse(bodyText);
       const ms = Number(parsed?.retryAfterMs);
       if (Number.isFinite(ms) && ms > 0) return ms;
+      const reset = parsed?.error?.resetsAt ? Date.parse(parsed.error.resetsAt) : NaN;
+      if (Number.isFinite(reset) && reset > Date.now()) return reset - Date.now();
     } catch {
       /* not JSON */
     }
@@ -331,38 +375,84 @@ export class Gateway {
     stream.pipe(res);
   }
 
+  /** Proxy the hosted model catalogue, cached briefly. */
+  async handleModels(req, res) {
+    if (this.modelsCache && Date.now() - this.modelsCache.at < MODELS_CACHE_MS) {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT' });
+      res.end(this.modelsCache.body);
+      return;
+    }
+
+    const tried = new Set();
+    for (;;) {
+      const account = this.manager.selectAccount(tried);
+      if (!account) break;
+      tried.add(account.name);
+
+      try {
+        const auth = await this.manager.getAuth(account);
+        const response = await fetch(this.upstreamUrl(this.upstream.modelsPath), {
+          headers: this.manager.authHeaders(auth),
+          signal: AbortSignal.timeout(20_000),
+        });
+        const body = await response.text();
+        this.manager.releaseAccount(account, { status: response.status });
+
+        if (response.ok) {
+          this.modelsCache = { at: Date.now(), body };
+          res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'MISS' });
+          res.end(body);
+          return;
+        }
+        console.warn(`⚠️  ${account.name} /models returned ${response.status}`);
+      } catch (error) {
+        this.manager.releaseAccount(account, { error: error.message, errorCode: 'upstream_unreachable' });
+        console.warn(`⚠️  ${account.name} /models failed: ${error.message}`);
+      }
+    }
+
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'No account could list models', type: 'gateway_error' } }));
+  }
+
   handleHealth(req, res) {
     const status = this.manager.getStatus();
-    const anyReady = status.instances.some((i) => i.ready);
+    const healthy = status.available > 0;
 
-    res.writeHead(anyReady ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
-        status: anyReady ? 'ok' : 'degraded',
+        status: healthy ? 'ok' : 'degraded',
         gateway: {
-          running: status.running,
-          ready: status.instances.filter((i) => i.ready).length,
-          total: status.totalInstances,
+          running: Boolean(this.server?.listening),
+          upstream: `${this.upstream.baseUrl}${this.upstream.chatPath}`,
+          ready: status.ready,
+          available: status.available,
+          total: status.totalAccounts,
         },
-        instances: status.instances.map((i) => ({
-          name: i.name,
-          running: i.running,
-          ready: i.ready,
-          limited: i.stats?.limited ?? null,
-          quota: i.stats ? `${i.stats.requestsToday}/${i.quotaPerDay}` : `0/${i.quotaPerDay}`,
-          inFlight: i.stats?.inFlight ?? 0,
+        accounts: status.accounts.map((a) => ({
+          name: a.name,
+          email: a.email,
+          ready: a.ready,
+          available: a.available,
+          used: a.used,
+          quota: `${a.used}/${a.quotaPerDay}`,
+          limited: a.stats.limited,
+          cooldownSeconds: Math.max(0, Math.round((a.stats.cooldownUntil - Date.now()) / 1000)),
+          error: a.error,
         })),
       }),
     );
   }
 
   handleStatus(req, res) {
-    const status = this.manager.getStatus();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(status, null, 2));
+    res.end(JSON.stringify(this.manager.getStatus(), null, 2));
   }
 
   setupDailyReset() {
+    // Hosted quota is governed by the provider, so the local counter is only a
+    // safety net. Reset it at UTC midnight (or gateway.quotaResetHour if set).
     const resetHour = this.gatewayConfig.quotaResetHour ?? 0;
 
     const now = new Date();
@@ -370,11 +460,11 @@ export class Gateway {
     if (nextReset <= now) nextReset.setUTCDate(nextReset.getUTCDate() + 1);
 
     const msUntilReset = nextReset - now;
-    console.log(`⏰ Next quota reset: ${nextReset.toISOString()} (in ${Math.round(msUntilReset / 1000 / 3600)} hours)\n`);
+    console.log(`⏰ Next local counter reset: ${nextReset.toISOString()} (in ${Math.round(msUntilReset / 1000 / 3600)} hours)\n`);
 
     this.resetTimer = setTimeout(() => {
-      this.manager.resetDailyQuota();
-      this.resetTimer = setInterval(() => this.manager.resetDailyQuota(), 24 * 60 * 60 * 1000);
+      this.manager.resetDailyQuota({ reason: 'daily timer' });
+      this.resetTimer = setInterval(() => this.manager.resetDailyQuota({ reason: 'daily timer' }), 24 * 60 * 60 * 1000);
       this.resetTimer.unref?.();
     }, msUntilReset);
     this.resetTimer.unref?.();
@@ -392,6 +482,18 @@ export class Gateway {
       await new Promise((resolve) => this.server.close(resolve));
     }
 
-    await this.manager.stopAll();
+    await this.manager.stop();
   }
 }
+
+/** Map a hosted-API error body to a quota cause. */
+export function classifyLimit(bodyText) {
+  if (!bodyText) return null;
+  if (bodyText.includes('FreeUsageLimitError')) return 'free-limit';
+  if (bodyText.includes('GoUsageLimitError')) return 'go-limit';
+  if (bodyText.includes('BudgetLimitError')) return 'budget-limit';
+  if (/rate.?limit/i.test(bodyText)) return 'rate-limit';
+  return null;
+}
+
+export default Gateway;

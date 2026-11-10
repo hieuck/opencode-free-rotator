@@ -10,12 +10,11 @@
   "scripts": {
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "start": "node server.mjs",
-    "instances:start": "node cli.mjs start",
-    "instances:stop": "node cli.mjs stop",
-    "instances:status": "node cli.mjs status",
-    "instances:reset-quota": "node cli.mjs reset-quota",
-    "probe:api": "node scripts/probe-api.mjs",
-    "docs:openapi": "node scripts/dump-openapi.mjs"
+    "status": "node cli.mjs status",
+    "accounts": "node cli.mjs accounts",
+    "models": "node cli.mjs models",
+    "reset-quota": "node cli.mjs reset-quota",
+    "e2e:hosted": "node test-hosted.mjs"
   },
   "keywords": [
     "opencode",
@@ -26,9 +25,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "yaml": "^2.9.1"
-  },
-  "devDependencies": {
-    "better-sqlite3": "^13.0.3"
   }
 }
