@@ -1,14 +1,7 @@
 #!/usr/bin/env node
 /**
- * OpenCode Multi-Account Gateway
- * Like Kiro/Codex - Pool of accounts with auto-rotation
- * 
- * Setup Flow:
- * 1. User starts gateway
- * 2. Gateway shows which accounts need setup
- * 3. User clicks "Setup Account X" → Opens OpenCode
- * 4. User connects → Account added to pool
- * 5. Gateway rotates automatically!
+ * Gateway with OAuth Integration
+ * Click button → Browser opens → Login → Done!
  */
 
 import express from 'express';
@@ -23,51 +16,15 @@ const app = express();
 app.use(express.json());
 
 const DATA_DIR = join(os.homedir(), '.local/share/opencode');
-const TOTAL_ACCOUNTS = 3; // Support up to 3 accounts
-
-// Account pool (like Kiro/Codex)
 const accountPool = [];
 
-/**
- * Load all authenticated accounts from disk
- */
 function loadAccountPool() {
   accountPool.length = 0;
   
-  // Account 1: opencode.db (main)
-  const db1Path = join(DATA_DIR, 'opencode.db');
-  if (existsSync(db1Path)) {
-    try {
-      const db = new Database(db1Path, { readonly: true });
-      const cred = db.prepare(`
-        SELECT * FROM credential 
-        WHERE integration_id = 'opencode'
-        ORDER BY time_created DESC LIMIT 1
-      `).get();
-      db.close();
-      
-      if (cred) {
-        const value = JSON.parse(cred.value);
-        accountPool.push({
-          id: 1,
-          name: 'Account 1',
-          dbPath: db1Path,
-          email: value.metadata?.email || 'Unknown',
-          accountID: value.metadata?.accountID || 'Unknown',
-          requestCount: 0,
-          quotaUsed: 0,
-          quotaLimit: 200,
-          active: true
-        });
-      }
-    } catch (err) {
-      console.log('⚠️  Account 1 error:', err.message);
-    }
-  }
-  
-  // Accounts 2-3: db2.db, db3.db
-  for (let i = 2; i <= TOTAL_ACCOUNTS; i++) {
-    const dbPath = join(DATA_DIR, `db${i}.db`);
+  for (let i = 1; i <= 3; i++) {
+    const dbPath = i === 1 
+      ? join(DATA_DIR, 'opencode.db')
+      : join(DATA_DIR, `db${i}.db`);
     
     if (existsSync(dbPath)) {
       try {
@@ -94,44 +51,28 @@ function loadAccountPool() {
           });
         }
       } catch (err) {
-        // db exists but not authenticated yet
+        // ignore
       }
     }
   }
   
   console.log(`✅ Loaded ${accountPool.length} account(s) in pool`);
-  accountPool.forEach(a => {
-    console.log(`   ${a.name}: ${a.email}`);
-  });
+  accountPool.forEach(a => console.log(`   ${a.name}: ${a.email}`));
 }
 
 loadAccountPool();
 
-/**
- * Get next available account from pool (round-robin)
- */
 function getNextAccount() {
   const available = accountPool.filter(a => a.active && a.quotaUsed < a.quotaLimit);
-  
-  if (available.length === 0) {
-    return null;
-  }
-  
-  // Return account with lowest usage
-  return available.reduce((prev, curr) => 
-    prev.quotaUsed <= curr.quotaUsed ? prev : curr
-  );
+  if (available.length === 0) return null;
+  return available.reduce((prev, curr) => prev.quotaUsed <= curr.quotaUsed ? prev : curr);
 }
 
-/**
- * Call OpenCode with specific account
- */
 async function callOpenCodeWithAccount(account, model, prompt) {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === 'win32';
     
     console.log(`   🔧 Using ${account.name} (${account.email})`);
-    console.log(`   📊 Quota: ${account.quotaUsed}/${account.quotaLimit}`);
     
     const proc = isWindows
       ? spawn('powershell.exe', [
@@ -146,13 +87,8 @@ async function callOpenCodeWithAccount(account, model, prompt) {
     let stdout = '';
     let stderr = '';
     
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-    
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
+    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
     
     proc.on('close', (code) => {
       if (code === 0) {
@@ -172,9 +108,6 @@ async function callOpenCodeWithAccount(account, model, prompt) {
   });
 }
 
-/**
- * Main chat endpoint with rotation
- */
 app.post('/v1/chat/completions', async (req, res) => {
   const { messages, model = 'opencode/deepseek-v4.1-flash-free' } = req.body;
   
@@ -186,21 +119,18 @@ app.post('/v1/chat/completions', async (req, res) => {
   
   const prompt = messages[messages.length - 1].content;
   
-  console.log(`\\n📨 Request: ${prompt.substring(0, 50)}...`);
-  console.log(`   Model: ${model}`);
+  console.log(`\n📨 Request: ${prompt.substring(0, 50)}...`);
   
-  // Try accounts from pool
   let lastError = null;
   
   for (const account of accountPool) {
     if (!account.active || account.quotaUsed >= account.quotaLimit) {
-      console.log(`   ⏭️  Skip ${account.name} (exhausted or inactive)`);
+      console.log(`   ⏭️  Skip ${account.name} (exhausted)`);
       continue;
     }
     
     try {
       const result = await callOpenCodeWithAccount(account, model, prompt);
-      
       console.log(`   ✅ Success with ${account.name}`);
       
       return res.json({
@@ -252,14 +182,11 @@ app.post('/v1/chat/completions', async (req, res) => {
   });
 });
 
-/**
- * Pool status
- */
 app.get('/pool', (req, res) => {
-  loadAccountPool(); // Reload to detect new accounts
+  loadAccountPool();
   
   const setupNeeded = [];
-  for (let i = 1; i <= TOTAL_ACCOUNTS; i++) {
+  for (let i = 1; i <= 3; i++) {
     const exists = accountPool.find(a => a.id === i);
     if (!exists) {
       setupNeeded.push({
@@ -286,13 +213,11 @@ app.get('/pool', (req, res) => {
   });
 });
 
-/**
- * Setup account endpoint
- */
+// 🎯 AUTO OAUTH FLOW - Click button → Browser opens → Login → Done!
 app.post('/setup/:accountId', (req, res) => {
   const accountId = parseInt(req.params.accountId);
   
-  if (accountId < 1 || accountId > TOTAL_ACCOUNTS) {
+  if (accountId < 1 || accountId > 3) {
     return res.status(400).json({ error: 'Invalid account ID' });
   }
   
@@ -300,46 +225,70 @@ app.post('/setup/:accountId', (req, res) => {
     ? join(DATA_DIR, 'opencode.db')
     : join(DATA_DIR, `db${accountId}.db`);
   
-  console.log(`\\n🔐 Setting up Account ${accountId}...`);
+  console.log(`\n🚀 Auto-starting OAuth for Account ${accountId}...`);
   console.log(`   Database: ${dbPath}`);
   
   const isWindows = process.platform === 'win32';
   
+  // Spawn OpenCode with /connect command auto-executed
   const proc = isWindows
     ? spawn('powershell.exe', [
-        '-NoProfile', '-Command',
-        `$env:OPENCODE_DB="${dbPath}"; opencode`
-      ], { detached: true, stdio: 'ignore' })
-    : spawn('opencode', [], {
-        env: { ...process.env, OPENCODE_DB: dbPath },
+        '-NoProfile',
+        '-Command',
+        `$env:OPENCODE_DB="${dbPath}"; echo '/connect' | opencode`
+      ], { 
+        detached: true, 
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+    : spawn('bash', [
+        '-c',
+        `echo '/connect' | OPENCODE_DB="${dbPath}" opencode`
+      ], {
         detached: true,
-        stdio: 'ignore'
+        stdio: ['pipe', 'pipe', 'pipe']
       });
+  
+  // Monitor for successful auth
+  let output = '';
+  proc.stdout.on('data', (data) => {
+    output += data.toString();
+    console.log(`   📝 ${data.toString().trim()}`);
+  });
+  
+  proc.stderr.on('data', (data) => {
+    console.log(`   ⚠️  ${data.toString().trim()}`);
+  });
+  
+  proc.on('close', (code) => {
+    console.log(`\n✅ OAuth flow completed (exit ${code})`);
+    
+    // Reload pool to check if account was added
+    setTimeout(() => {
+      loadAccountPool();
+    }, 2000);
+  });
   
   proc.unref();
   
   res.json({
-    message: `OpenCode started for Account ${accountId}`,
+    message: `OAuth flow started for Account ${accountId}`,
     instructions: [
-      'OpenCode CLI will open in a new window',
-      'Run: /connect',
-      'Login with a DIFFERENT email than existing accounts',
-      'Close OpenCode when done',
-      'Refresh pool to see new account'
+      'Browser will open automatically',
+      'Login with a DIFFERENT email',
+      'Authorize OpenCode',
+      'Close browser when done',
+      'Account will be added automatically!'
     ],
     dbPath
   });
 });
 
-/**
- * Web UI
- */
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-  <title>OpenCode Multi-Account Gateway</title>
+  <title>OpenCode Gateway - Auto OAuth</title>
   <meta charset="utf-8">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -435,6 +384,11 @@ app.get('/', (req, res) => {
     }
     button:hover { background: #5568d3; transform: translateY(-2px); }
     button:active { transform: translateY(0); }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -475,13 +429,25 @@ app.get('/', (req, res) => {
     .instructions li {
       margin: 8px 0;
     }
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s ease-in-out infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>🚀 OpenCode Multi-Account Gateway</h1>
-      <p class="subtitle">Like Kiro/Codex - Automatic rotation between accounts</p>
+      <h1>🚀 OpenCode Gateway - Auto OAuth</h1>
+      <p class="subtitle">Click button → Browser opens → Login → Done!</p>
     </div>
     
     <div class="pool">
@@ -506,18 +472,21 @@ app.get('/', (req, res) => {
     
     <div class="pool">
       <div class="instructions">
-        <h3>✅ How It Works:</h3>
+        <h3>✅ Automatic OAuth Flow:</h3>
         <ol>
-          <li><strong>Setup accounts:</strong> Click "Setup Account X" below</li>
-          <li><strong>Connect:</strong> OpenCode opens → run /connect → login</li>
-          <li><strong>Use gateway:</strong> Point your app to http://localhost:3000/v1</li>
-          <li><strong>Auto-rotation:</strong> Gateway switches accounts automatically!</li>
+          <li><strong>Click "Add Account X"</strong> below</li>
+          <li><strong>Browser opens automatically</strong> with login page</li>
+          <li><strong>Login with different email</strong> and authorize</li>
+          <li><strong>Done!</strong> Account added to pool automatically</li>
+          <li><strong>Gateway rotates</strong> between accounts transparently</li>
         </ol>
       </div>
     </div>
   </div>
   
   <script>
+    const setupInProgress = new Set();
+    
     async function loadPool() {
       const res = await fetch('/pool');
       const data = await res.json();
@@ -541,13 +510,19 @@ app.get('/', (req, res) => {
       
       // Accounts needing setup
       data.setup_needed.forEach(acc => {
+        const isSetupInProgress = setupInProgress.has(acc.id);
         html += \`
           <div class="account setup-needed">
             <div class="account-info">
               <div class="account-name">\${acc.name}</div>
-              <div class="account-email">Not setup yet</div>
+              <div class="account-email">\${isSetupInProgress ? 'Setting up... browser should open' : 'Not connected yet'}</div>
             </div>
-            <button onclick="setupAccount(\${acc.id})">Setup Account \${acc.id}</button>
+            <button 
+              onclick="setupAccount(\${acc.id})"
+              \${isSetupInProgress ? 'disabled' : ''}
+            >
+              \${isSetupInProgress ? '<span class="loading"></span> Setting up...' : 'Add Account ' + acc.id}
+            </button>
           </div>
         \`;
       });
@@ -559,12 +534,44 @@ app.get('/', (req, res) => {
     }
     
     async function setupAccount(id) {
+      setupInProgress.add(id);
+      loadPool();
+      
       const res = await fetch(\`/setup/\${id}\`, { method: 'POST' });
       const data = await res.json();
-      alert(data.message + '\\n\\n' + data.instructions.join('\\n'));
       
-      // Reload after 5 seconds
-      setTimeout(loadPool, 5000);
+      alert(
+        '🚀 ' + data.message + '\\n\\n' +
+        '✅ Browser will open automatically\\n' +
+        '✅ Login with DIFFERENT email\\n' +
+        '✅ Authorize OpenCode\\n' +
+        '✅ Account will be added!\\n\\n' +
+        'Refreshing pool in 10 seconds...'
+      );
+      
+      // Poll for account to appear
+      let attempts = 0;
+      const checkInterval = setInterval(async () => {
+        attempts++;
+        await loadPool();
+        
+        const poolRes = await fetch('/pool');
+        const poolData = await poolRes.json();
+        const accountExists = poolData.pool.find(a => a.id === id);
+        
+        if (accountExists || attempts > 20) {
+          setupInProgress.delete(id);
+          clearInterval(checkInterval);
+          
+          if (accountExists) {
+            alert(\`✅ Account \${id} added successfully!\\nEmail: \${accountExists.email}\`);
+          } else {
+            alert(\`⚠️  Account \${id} not detected yet.\\nMake sure you completed OAuth flow.\\nRefresh page to check.\`);
+          }
+          
+          loadPool();
+        }
+      }, 3000);
     }
     
     loadPool();
@@ -581,19 +588,19 @@ app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
-║  🚀 Multi-Account Gateway - RUNNING                       ║
+║  🚀 Multi-Account Gateway - AUTO OAUTH                    ║
 ║                                                            ║
 ║  📡 API: http://localhost:${PORT}/v1/chat/completions          ║
 ║  🎛️  Web UI: http://localhost:${PORT}/                         ║
 ║  📊 Pool Status: http://localhost:${PORT}/pool                 ║
 ║                                                            ║
-║  💡 Like Kiro/Codex - Account Pool Pattern!              ║
+║  💡 Click button → Browser opens → Login → Done!          ║
 ║                                                            ║
 ║  🔧 Current Pool: ${accountPool.length} account(s)                          ║
 ║  📈 Total Capacity: ${accountPool.length * 200} requests/day                ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
 
-Ready for multi-account rotation! 🎉
+Ready! Open http://localhost:${PORT} and click "Add Account" 🎉
   `);
 });
