@@ -86,13 +86,22 @@ function getNextAccount() {
  */
 async function callOpenCode(account, model, prompt) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('opencode', ['run', prompt, '--model', model], {
-      env: {
-        ...process.env,
-        OPENCODE_DB: account.dbPath
-      },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+    // On Windows, use PowerShell to run opencode
+    const isWindows = process.platform === 'win32';
+    const proc = isWindows
+      ? spawn('powershell.exe', [
+          '-NoProfile', '-Command',
+          `$env:OPENCODE_DB="${account.dbPath}"; opencode run "${prompt.replace(/"/g, '\\"')}" --model ${model}`
+        ], {
+          stdio: ['pipe', 'pipe', 'pipe']
+        })
+      : spawn('opencode', ['run', prompt, '--model', model], {
+          env: {
+            ...process.env,
+            OPENCODE_DB: account.dbPath
+          },
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
     
     let stdout = '';
     let stderr = '';
@@ -232,13 +241,19 @@ app.post('/accounts/add', async (req, res) => {
   console.log(`   Database: ${dbPath}`);
   
   // Spawn OpenCode with the new database
-  const proc = spawn('opencode', [], {
-    env: {
-      ...process.env,
-      OPENCODE_DB: dbPath
-    },
-    stdio: 'inherit'
-  });
+  // On Windows, use PowerShell to run opencode
+  const isWindows = process.platform === 'win32';
+  const proc = isWindows 
+    ? spawn('powershell.exe', ['-NoProfile', '-Command', `$env:OPENCODE_DB="${dbPath}"; opencode`], {
+        stdio: 'inherit'
+      })
+    : spawn('opencode', [], {
+        env: {
+          ...process.env,
+          OPENCODE_DB: dbPath
+        },
+        stdio: 'inherit'
+      });
   
   proc.on('close', (code) => {
     if (code === 0) {
