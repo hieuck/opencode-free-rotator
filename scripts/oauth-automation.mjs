@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
  * OpenCode OAuth Automation Script
- * Uses OpenCode device flow - fully automated!
+ * Simple wrapper that just runs OpenCode auth with correct database
  */
 
 import { spawn } from 'child_process';
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
-import open from 'open';
 
 const SLOT = parseInt(process.argv[2]);
 const DB_PATH = process.argv[3];
@@ -24,61 +23,26 @@ if (!existsSync(dbDir)) {
 }
 
 /**
- * Run OpenCode auth login with auto browser opening
+ * Run OpenCode auth login
  */
 async function runOpenCodeAuth() {
   return new Promise((resolve, reject) => {
-    console.log('🚀 Starting OpenCode device flow...');
+    console.log('🚀 Starting OpenCode auth login...');
+    console.log('   (Browser will open automatically by OpenCode)');
     console.log();
     
-    const env = { ...process.env };
-    if (SLOT > 1) {
-      env.OPENCODE_DB = DB_PATH;
-    }
+    // Build PowerShell command with environment variable
+    const psCommand = SLOT > 1
+      ? `$env:OPENCODE_DB="${DB_PATH}"; opencode auth login opencode`
+      : 'opencode auth login opencode';
     
-    // Spawn opencode auth login
-    const proc = spawn('opencode', ['auth', 'login', 'opencode'], {
-      env,
-      stdio: ['inherit', 'pipe', 'pipe']
-    });
-    
-    let output = '';
-    let oauthUrl = null;
-    let browserOpened = false;
-    
-    proc.stdout.on('data', (data) => {
-      const text = data.toString();
-      output += text;
-      
-      // Print output
-      process.stdout.write(text);
-      
-      // Look for OAuth URL and auto-open browser
-      if (!browserOpened) {
-        // Match verification_uri_complete or Go to: URL
-        const urlMatch = text.match(/https:\/\/console\.opencode\.ai[^\s]+/);
-        if (urlMatch) {
-          oauthUrl = urlMatch[0];
-          browserOpened = true;
-          
-          // Auto-open browser after a short delay
-          setTimeout(async () => {
-            console.log();
-            console.log('🌐 Opening browser automatically...');
-            console.log();
-            try {
-              await open(oauthUrl);
-            } catch (err) {
-              console.error('Could not open browser:', err.message);
-              console.error('Please open manually:', oauthUrl);
-            }
-          }, 1000);
-        }
-      }
-    });
-    
-    proc.stderr.on('data', (data) => {
-      process.stderr.write(data);
+    // Spawn with full TTY so OpenCode can interact
+    const proc = spawn('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      psCommand
+    ], {
+      stdio: 'inherit'  // Full terminal passthrough
     });
     
     proc.on('close', (code) => {
@@ -90,11 +54,9 @@ async function runOpenCodeAuth() {
       }
     });
     
-    // Timeout after 5 minutes
-    setTimeout(() => {
-      proc.kill();
-      reject(new Error('Timeout waiting for authorization'));
-    }, 300000);
+    proc.on('error', (err) => {
+      reject(err);
+    });
   });
 }
 
@@ -135,7 +97,7 @@ function checkCredential() {
  */
 async function main() {
   try {
-    // Run OpenCode auth login (it handles device flow internally)
+    // Run OpenCode auth login
     await runOpenCodeAuth();
     
     // Check if credential was saved
