@@ -1,10 +1,27 @@
 # OpenCode Free Rotator
 
-⚠️ **Status: Research Project - Not Production Ready**
+💡 **Multiple solutions for bypassing OpenCode free tier 200 req/day limit**
 
-**Goal:** Gateway to bypass OpenCode free tier 200 req/day limit through multi-instance pooling.
+## ⚡ Quick Solution (For Personal Use)
 
-**Current Status:** Architecture designed and implemented, but **core functionality blocked** by API incompatibility. See [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for details.
+**If you just need more quota on your personal machine:**
+
+👉 **See [README-PERSONAL-USE.md](README-PERSONAL-USE.md)** 👈
+
+- ✅ **5 minutes setup** (vs 8 hours)
+- ✅ **600+ req/day** with 3 accounts
+- ✅ Simple alias or script
+- ✅ No complex server management
+
+---
+
+## 🏗️ Complex Solution (Production API)
+
+**If you need automatic gateway for production:**
+
+⚠️ **Status: Research Project - Translation Layer Required**
+
+The original gateway architecture is sound but requires 8-16 hours to implement OpenAI → OpenCode API translation layer. See [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for technical details.
 
 ```
 Gateway → OpenCode Instance 1 (200 req/day)
@@ -20,12 +37,26 @@ Scale OpenCode free tier usage by rotating multiple accounts, each with isolated
 
 ## 🚧 Implementation Status
 
-- ✅ Phase 1: OAuth token research complete
-- ✅ Phase 2: Multi-instance architecture designed
-- ✅ Phase 3: Instance manager implemented
-- ✅ Phase 4: Gateway proxy implemented
-- ✅ Phase 5: Production deployment configs ready
-- ❌ **BLOCKER:** Local OpenCode servers don't expose `/v1/chat/completions`
+### Simple Solution (Personal Use) ✅
+- ✅ **Ready to use** - 5 minutes setup
+- ✅ Manual account switching with alias
+- ✅ Auto-rotate scripts (bash/Windows)
+- ✅ Perfect for personal machines
+
+### Complex Solution (Production API) ⚠️
+- ✅ Phase 1-5: Complete architecture & docs
+- ❌ **Blocked:** Translation layer needed (8-16h)
+- ⚠️ For production API services only
+
+## 📊 Which Solution for You?
+
+| Your Need | Recommended Solution | Setup Time | Quota |
+|-----------|---------------------|------------|-------|
+| **Personal machine** | Simple (alias/script) | 5-15 min | 600+ req/day |
+| **Learning/Research** | Both (already done) | 8h | N/A |
+| **Production API service** | Complex (needs work) | 8-16h more | 600+ req/day |
+
+👉 **Most users want:** [Simple Personal Solution](README-PERSONAL-USE.md)
 
 ## ⚠️ Critical Issue
 
