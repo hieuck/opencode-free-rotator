@@ -127,7 +127,7 @@ function getNextSlot() {
 }
 
 /**
- * Add Account - Opens OpenCode in new terminal
+ * Add Account - Simple instructions approach
  */
 app.post('/accounts/add', (req, res) => {
   const slot = getNextSlot();
@@ -138,68 +138,13 @@ app.post('/accounts/add', (req, res) => {
     });
   }
   
-  console.log(`\n🔐 Setting up Account ${slot.id}...`);
+  console.log(`\n🔐 Setup instructions for Account ${slot.id}`);
   console.log(`   Database: ${slot.dbPath}`);
   
-  // Create PowerShell script to open new terminal with OpenCode
-  const scriptPath = join(os.tmpdir(), `opencode-setup-${slot.id}.ps1`);
-  const script = slot.id === 1 
-    ? `
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  OpenCode Account ${slot.id} Setup" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Database: ${slot.dbPath}" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Steps:" -ForegroundColor White
-Write-Host "1. Type: /connect" -ForegroundColor Yellow
-Write-Host "2. Login with your email" -ForegroundColor Yellow
-Write-Host "3. Close this window when done" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-
-opencode
-
-Write-Host ""
-Write-Host "Setup complete! Refresh the web page." -ForegroundColor Green
-Read-Host "Press Enter to close"
-`
-    : `
-$env:OPENCODE_DB = "${slot.dbPath}"
-
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  OpenCode Account ${slot.id} Setup" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Database: ${slot.dbPath}" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Steps:" -ForegroundColor White
-Write-Host "1. Type: /connect" -ForegroundColor Yellow
-Write-Host "2. Login with DIFFERENT email" -ForegroundColor Yellow
-Write-Host "3. Close this window when done" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-
-opencode
-
-Write-Host ""
-Write-Host "Setup complete! Refresh the web page." -ForegroundColor Green
-Read-Host "Press Enter to close"
-`;
-  
-  writeFileSync(scriptPath, script, 'utf8');
-  
-  // Open new PowerShell terminal
-  spawn('powershell.exe', [
-    '-NoExit',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', scriptPath
-  ], {
-    detached: true,
-    stdio: 'ignore'
-  }).unref();
+  // Generate PowerShell command
+  const psCommand = slot.id === 1
+    ? 'opencode'
+    : `$env:OPENCODE_DB="${slot.dbPath}"; opencode`;
   
   setupSessions.set(slot.id, {
     id: slot.id,
@@ -208,15 +153,18 @@ Read-Host "Press Enter to close"
   });
   
   res.json({
-    message: `Setup started for Account ${slot.id}`,
+    message: `Setup Account ${slot.id}`,
+    slot: slot.id,
+    database: slot.dbPath,
+    powershell_command: psCommand,
     instructions: [
-      'A new terminal window opened',
+      'Open PowerShell',
+      `Run: ${psCommand}`,
       'Type: /connect',
       'Login with your email',
       'Close terminal when done',
       'Refresh this page'
-    ],
-    slot: slot.id
+    ]
   });
 });
 
@@ -560,23 +508,78 @@ app.get('/', (req, res) => {
           return;
         }
         
-        alert(
-          '🚀 Setup Started!\\n\\n' +
-          'A terminal window opened.\\n' +
-          'Type: /connect\\n' +
-          'Login with your email\\n\\n' +
-          'This page will refresh when you\\'re done.'
-        );
+        // Show instructions modal
+        const modal = document.createElement('div');
+        modal.style.cssText = \`
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background: rgba(0,0,0,0.8);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1000;
+        \`;
+        
+        modal.innerHTML = \\\`
+          <div style="background: white; border-radius: 12px; padding: 40px; max-width: 700px;">
+            <h2 style="color: #667eea; margin-bottom: 20px;">🔐 Setup Account \\\${data.slot}</h2>
+            <p style="color: #666; margin-bottom: 20px;">Follow these steps to connect your account:</p>
+            
+            <div style="background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+              <div style="color: #aaa; font-size: 0.85em; margin-bottom: 8px;">PowerShell Command:</div>
+              <code style="color: #4af; font-size: 1.1em; font-family: 'Consolas', monospace;">\\\${data.powershell_command}</code>
+              <button onclick="navigator.clipboard.writeText('\\\${data.powershell_command}'); this.textContent='✅ Copied!'" 
+                      style="margin-left: 15px; background: #667eea; color: white; border: none; padding: 8px 16px; 
+                             border-radius: 6px; cursor: pointer; font-size: 0.9em;">
+                📋 Copy
+              </button>
+            </div>
+            
+            <div style="background: #e7f3ff; border-left: 4px solid #2196f3; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+              <h4 style="color: #1976d2; margin-bottom: 10px;">✅ Steps:</h4>
+              <ol style="color: #555; margin-left: 20px; line-height: 1.8;">
+                <li>Open <strong>PowerShell</strong></li>
+                <li>Copy & paste the command above</li>
+                <li>Type: <code>/connect</code></li>
+                <li>Click the OAuth link that appears</li>
+                <li>Login with your email & authorize</li>
+                <li>Close terminal when done</li>
+              </ol>
+            </div>
+            
+            <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+              <strong style="color: #856404;">⚠️ Important:</strong>
+              <p style="color: #856404; margin: 5px 0 0 0; font-size: 0.9em;">
+                Use a <strong>different email</strong> for each account (not dungbanemok@gmail.com)
+              </p>
+            </div>
+            
+            <button onclick="this.parentElement.parentElement.remove(); location.reload();" 
+                    style="width: 100%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                           color: white; border: none; padding: 15px; border-radius: 8px; 
+                           cursor: pointer; font-size: 1.1em; font-weight: 600;">
+              ✅ I'm Done - Refresh Page
+            </button>
+          </div>
+        \\\`;
+        
+        document.body.appendChild(modal);
         
         // Poll for new account
         const pollInterval = setInterval(async () => {
           const statusRes = await fetch('/accounts');
           const statusData = await statusRes.json();
           
-          if (statusData.slots_used > 0) {
+          const prevCount = parseInt(document.getElementById('total-accounts').textContent);
+          if (statusData.slots_used > prevCount) {
             adding = false;
             clearInterval(pollInterval);
+            modal.remove();
             loadAccounts();
+            alert('✅ Account added successfully!');
           }
         }, 3000);
         
@@ -584,7 +587,6 @@ app.get('/', (req, res) => {
         setTimeout(() => {
           adding = false;
           clearInterval(pollInterval);
-          loadAccounts();
         }, 300000);
         
       } catch (err) {
