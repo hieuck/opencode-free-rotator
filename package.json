@@ -6,8 +6,11 @@
   "main": "src/index.mjs",
   "scripts": {
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "dev": "node src/cli.mjs",
-    "start": "node src/server.mjs"
+    "start": "node server.mjs",
+    "instances:start": "node cli.mjs start",
+    "instances:stop": "node cli.mjs stop",
+    "instances:status": "node cli.mjs status",
+    "instances:reset-quota": "node cli.mjs reset-quota"
   },
   "keywords": [
     "opencode",
