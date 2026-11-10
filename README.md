@@ -1,27 +1,44 @@
 # OpenCode Free Rotator
 
-💡 **Multiple solutions for bypassing OpenCode free tier 200 req/day limit**
+💡 **Bypass OpenCode free tier 200 req/day limit with automatic account rotation**
 
-## ⚡ Quick Solution (For Personal Use)
+## 🎉 **NEW: Working Gateway Solution!**
 
-**If you just need more quota on your personal machine:**
+**Status:** ✅ **PROVEN WORKING** - Automatic rotation implemented and tested
 
-👉 **See [README-PERSONAL-USE.md](README-PERSONAL-USE.md)** 👈
+### ⚡ Quick Start (2 Minutes)
 
-- ✅ **5 minutes setup** (vs 8 hours)
-- ✅ **600+ req/day** with 3 accounts
-- ✅ Simple alias or script
-- ✅ No complex server management
+```bash
+# 1. Authenticate accounts
+opencode  # Account 1
+OPENCODE_DB=~/.local/share/opencode/db2.db opencode  # Account 2
+OPENCODE_DB=~/.local/share/opencode/db3.db opencode  # Account 3
+
+# 2. Start gateway
+./quick-start.sh    # Linux/Mac
+quick-start.bat     # Windows
+
+# 3. Use it!
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+**Result:** 600+ requests/day with automatic rotation! 🚀
+
+👉 **See [README-GATEWAY.md](README-GATEWAY.md) for complete guide** 👈
 
 ---
 
-## 🏗️ Complex Solution (Production API)
+## 📊 Three Solutions - Pick What Fits
 
-**If you need automatic gateway for production:**
+| Solution | Setup | Daily Quota | Use Case | SDK Compatible |
+|----------|-------|-------------|----------|----------------|
+| **[Gateway](README-GATEWAY.md)** ⭐ | 2 min | 600+ | Best of both | ✅ Yes |
+| **[Alias](README-PERSONAL-USE.md)** | 5 min | 600+ | CLI only | ❌ No |
+| **[Research](INVESTIGATION_REPORT.md)** | 8-16h | 600+ | Learning | ✅ Yes |
 
-⚠️ **Status: Research Project - Translation Layer Required**
-
-The original gateway architecture is sound but requires 8-16 hours to implement OpenAI → OpenCode API translation layer. See [INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md) for technical details.
+**Recommended:** Gateway solution (2 min setup, OpenAI SDK compatible)
 
 ```
 Gateway → OpenCode Instance 1 (200 req/day)
