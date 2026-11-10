@@ -1,0 +1,62 @@
+# OpenCode Free Rotator - systemd service
+#
+# Installation:
+# 1. Edit paths in this file (User, WorkingDirectory, ExecStart)
+# 2. Copy to /etc/systemd/system/:
+#    sudo cp opencode-rotator.service /etc/systemd/system/
+# 3. Reload systemd:
+#    sudo systemctl daemon-reload
+# 4. Enable and start:
+#    sudo systemctl enable opencode-rotator
+#    sudo systemctl start opencode-rotator
+# 5. Check status:
+#    sudo systemctl status opencode-rotator
+# 6. View logs:
+#    journalctl -u opencode-rotator -f
+
+[Unit]
+Description=OpenCode Free Rotator Gateway
+Documentation=https://github.com/yourusername/opencode-free-rotator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# TODO: Replace with your username
+User=your-username
+
+# TODO: Replace with actual path
+WorkingDirectory=/home/your-username/opencode-free-rotator
+
+# TODO: Replace with actual node path (run: which node)
+ExecStart=/usr/bin/node server.mjs
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/your-username/.local/share/opencode
+
+# Environment
+Environment=NODE_ENV=production
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-rotator
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
