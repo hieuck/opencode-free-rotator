@@ -11,6 +11,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import ProxyPoolManager from './ProxyPoolManager.mjs';
 
 const app = express();
 app.use(express.json());
@@ -19,6 +20,9 @@ const DATA_DIR = join(os.homedir(), '.local/share/opencode');
 const GATEWAY_PORT = 3200;        // Gateway API endpoint
 const SERVER_PORT_START = 3201;   // OpenCode servers start from 3201
 const MAX_ACCOUNTS = 99;          // Support up to 99 accounts (ports 3201-3299)
+
+// Proxy pool manager
+const proxyManager = new ProxyPoolManager();
 
 // Track running servers
 const servers = new Map();
@@ -70,9 +74,23 @@ function startOpenCodeServer(account) {
   
   console.log(`\n🚀 Starting Server ${account.id} (${account.email})...`);
   
+  // Get next proxy from pool
+  const proxy = proxyManager.next();
+  
   const env = { ...process.env };
   if (account.id > 1) {
     env.OPENCODE_DB = account.dbPath;
+  }
+  
+  // Apply proxy if available
+  if (proxy) {
+    const proxyEnv = proxyManager.getProxyEnv(proxy);
+    Object.assign(env, proxyEnv);
+    console.log(`   📡 Using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
+    account.proxy = proxy;
+  } else {
+    console.log(`   📡 Using direct connection (no proxy)`);
+    account.proxy = null;
   }
   
   const args = account.id > 1
